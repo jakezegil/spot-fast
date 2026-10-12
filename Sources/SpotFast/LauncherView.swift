@@ -10,7 +10,10 @@ struct SearchField: NSViewRepresentable {
         let field = NSTextField()
         field.isBordered = false; field.drawsBackground = false; field.focusRingType = .none
         field.font = .systemFont(ofSize: 23, weight: .regular)
-        field.placeholderString = "Search apps, files, and contacts"
+        field.placeholderAttributedString = NSAttributedString(
+            string: "Search apps, files, and contacts",
+            attributes: [.foregroundColor: NSColor.secondaryLabelColor,
+                         .font: NSFont.systemFont(ofSize: 23, weight: .regular)])
         field.textColor = .labelColor; field.delegate = context.coordinator
         field.setAccessibilityLabel("Search apps, files, and contacts")
         field.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
@@ -106,6 +109,7 @@ struct LauncherView: View {
                     .buttonStyle(.plain).foregroundStyle(.tertiary).help("Settings · ⌘,")
                     .accessibilityLabel("Open settings")
             }.padding(.horizontal, 20).frame(height: 66)
+                .background(Color(nsColor: .windowBackgroundColor))
             if expanded {
                 Divider()
                 HStack(spacing: 5) {
