@@ -1,6 +1,6 @@
 # SpotFast
 
-SpotFast is a native macOS launcher with application search, file search, document text search, arithmetic, conversions, dictionary, and web actions. It does not yet cover every Spotlight feature.
+SpotFast is a native macOS launcher with application search, file search, document text search, arithmetic, conversions, dictionary, System Settings shortcuts, and web actions. It does not yet cover every Spotlight feature.
 
 The source now connects to a dedicated hardened FSearch filename provider. Apple metadata supplies document text and fallback file results. Command–Space and FSearch are enabled by default in the app configuration. Actual activation requires the installation checks below.
 
@@ -38,9 +38,9 @@ The app uses an ad hoc signature for local development. It is not notarized. No 
 
 ## Validation
 
-Version 0.2.1 was tested on macOS 15.3.1 with Apple Silicon. The installed app registered Command–Space, and both user login agents ran successfully. The installed binaries matched the tested signed bundle.
+Version 0.2.2 was tested on macOS 15.3.1 with Apple Silicon. The installed app registered Command–Space, and both user login agents ran successfully. The installed binaries matched the tested signed bundle.
 
-Twenty Rust tests passed under release optimization. All thirty Swift tests, including live socket tests, passed without skips. Six installer regression tests passed. The pinned lockfile passed cargo-audit against 1,299 RustSec advisories, with no reported vulnerabilities or warnings.
+Twenty Rust tests passed under release optimization. All thirty-seven Swift tests, including live socket tests, passed without skips. Six installer regression tests passed. The pinned lockfile passed cargo-audit against 1,299 RustSec advisories, with no reported vulnerabilities or warnings.
 
 Runtime checks verified private directory/socket/lock permissions, the dedicated endpoint, and native shortcut registration. Apple metadata returned the existing Safari application entry. Validation included a completed index containing more than 14 million entries. Live filename search returned the temporary verification file; request rejection and daemon recovery checks passed. Fresh scans can take several minutes on large filesystems. Protected folders remain excluded; no Full Disk Access was granted.
 
@@ -73,6 +73,8 @@ The Swift build uses `--disable-sandbox` to support managed build environments. 
 | `safari`, `vsc` | Match application names, including subsequences |
 | `readme ext:rs` | Search filenames through FSearch |
 | `quarterly report` | Search filenames and indexed document text |
+| `sound`, `volume`, `wifi`, `keyboard shortcuts`, `dark mode` | Open the matching System Settings pane |
+| `microphone`, `camera`, `screen recording` | Open the corresponding privacy permissions page |
 | `~/Downloads` | Open an existing path |
 | `2 + 3 * 4`, `2^8` | Calculate locally; Return copies the result |
 | `10 mi to km`, `32 f to c`, `1 gib to mib` | Convert locally; Return copies the result |
@@ -108,6 +110,14 @@ The daemon skips protected folders even if it inherits broader access. Apple met
 Index loading checks counts and internal references before use. It copies files into anonymous maps to prevent later disk truncation from invalidating pointers. This changes memory use and startup cost; benchmarks remain pending.
 
 Same-user checks do not authenticate individual applications. Another process running as you can reach the socket. The launcher and daemon run with ordinary user permissions and are not App Sandbox-contained.
+
+## System Settings shortcuts
+
+Search for a pane name or a common alias, then press Return to open that pane. Examples: `sound`, `volume`, `display`, `wifi`, `keyboard shortcuts`, `disk space`, and `dark mode`. Use `settings sound` or `sound settings` to make the intent explicit. These results appear in All mode; Apps and Files keep their existing scope.
+
+SpotFast checks installed Apple settings bundles and hides unavailable panes. Settings → Search includes a toggle for this source. Deep links only navigate: they do not change volume, network connections, privacy permissions, or other settings. No Automation permission is required.
+
+The links use the URL scheme registered by System Settings. Pane identifiers and privacy anchors follow [Chromium's System Settings integration](https://chromium.googlesource.com/chromium/src/base/+/121663451b5528be114956be2c939ecc1d31551b/mac/mac_util.mm#442) and Apple-installed bundle metadata. Sound's visible pane was verified locally. Additional pane identifiers were checked against installed Apple bundles. URL handling can change between macOS versions; pane availability does not guarantee every route on every release.
 
 ## Remaining Spotlight coverage
 

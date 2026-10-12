@@ -29,6 +29,7 @@ enum WebEngine: String, CaseIterable, Identifiable {
     @Published var useFSearch: Bool { didSet { persist("useFSearch", useFSearch) } }
     @Published var useMetadata: Bool { didSet { persist("useMetadata", useMetadata) } }
     @Published var useCalculator: Bool { didSet { persist("useCalculator", useCalculator) } }
+    @Published var useSystemSettings: Bool { didSet { persist("useSystemSettings", useSystemSettings) } }
     @Published var useDictionary: Bool { didSet { persist("useDictionary", useDictionary) } }
     @Published var useWeb: Bool { didSet { persist("useWeb", useWeb) } }
     @Published var webEngine: WebEngine { didSet { persist("webEngine", webEngine.rawValue) } }
@@ -46,6 +47,7 @@ enum WebEngine: String, CaseIterable, Identifiable {
         useFSearch = defaults.object(forKey: "useFSearch") as? Bool ?? true
         useMetadata = defaults.object(forKey: "useMetadata") as? Bool ?? true
         useCalculator = defaults.object(forKey: "useCalculator") as? Bool ?? true
+        useSystemSettings = defaults.object(forKey: "useSystemSettings") as? Bool ?? true
         useDictionary = defaults.object(forKey: "useDictionary") as? Bool ?? true
         useWeb = defaults.object(forKey: "useWeb") as? Bool ?? true
         webEngine = WebEngine(rawValue: defaults.string(forKey: "webEngine") ?? "google") ?? .google

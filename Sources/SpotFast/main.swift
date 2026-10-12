@@ -205,12 +205,17 @@ final class LauncherPanel: NSPanel {
                 panel.appearance = NSAppearance(named: .darkAqua)
                 DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) { [self] in
                     snapshot(panel, name: "launcher-dark")
+                    model.text = "sound"
+                    guard model.selectedResult?.kind == .systemSetting,
+                          model.selectedResult?.title == "Sound" else { fputs("Settings search smoke failed\n", stderr); exit(1) }
+                    model.scope = .files
+                    guard !model.results.contains(where: { $0.kind == .systemSetting }) else { exit(1) }
                     model.scope = .applications
                     guard model.results.allSatisfy({ $0.kind == .application }) else { exit(1) }
                     showSettings()
                     DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) { [self] in
                         snapshot(settingsWindow!, name: "settings")
-                        print("UI smoke passed: calculator, scope filtering, launcher and settings rendering")
+                        print("UI smoke passed: calculator, System Settings search, scope filtering, launcher and settings rendering")
                         NSApp.terminate(nil)
                     }
                 }

@@ -81,6 +81,7 @@ struct SettingsView: View {
                 Toggle("Fast filename search", isOn: $settings.useFSearch)
                 Toggle("Document text & metadata", isOn: $settings.useMetadata)
                 Toggle("Calculator & conversions", isOn: $settings.useCalculator)
+                Toggle("System Settings shortcuts", isOn: $settings.useSystemSettings)
                 Toggle("Dictionary lookups", isOn: $settings.useDictionary)
                 Toggle("Web search action", isOn: $settings.useWeb)
                 if settings.useWeb { Picker("Search engine", selection: $settings.webEngine) { ForEach(WebEngine.allCases) { Text($0.title).tag($0) } } }

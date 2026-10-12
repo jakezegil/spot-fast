@@ -11,7 +11,7 @@ enum SearchScope: String, CaseIterable, Identifiable {
 }
 
 struct SearchResult: Identifiable {
-    enum Kind { case application, file, folder, calculation, conversion, dictionary, web, settings }
+    enum Kind { case application, file, folder, calculation, conversion, dictionary, web, settings, systemSetting }
     enum Action { case open(URL), copy(String), settings }
     let id: String
     let title: String
@@ -20,11 +20,13 @@ struct SearchResult: Identifiable {
     let action: Action
     var score: Double = 0
     var section: String = "Results"
+    var customSymbol: String?
     var fileURL: URL? {
         if case .open(let url) = action, url.isFileURL { return url }
         return nil
     }
     var symbol: String {
+        if let customSymbol { return customSymbol }
         switch kind {
         case .application: return "app"
         case .file: return "doc"
@@ -33,10 +35,10 @@ struct SearchResult: Identifiable {
         case .conversion: return "arrow.left.arrow.right"
         case .dictionary: return "character.book.closed"
         case .web: return "globe"
-        case .settings: return "slider.horizontal.3"
+        case .settings, .systemSetting: return "slider.horizontal.3"
         }
     }
-    var verb: String { fileURL != nil ? (kind == .application ? "Open app" : "Open") : (kind == .calculation || kind == .conversion ? "Copy answer" : "Open") }
+    var verb: String { if kind == .systemSetting { return "Open settings" }; return fileURL != nil ? (kind == .application ? "Open app" : "Open") : (kind == .calculation || kind == .conversion ? "Copy answer" : "Open") }
 }
 
 @MainActor final class SearchModel: ObservableObject {
@@ -60,6 +62,7 @@ struct SearchResult: Identifiable {
     private var query: NSMetadataQuery?
     private var observers: [NSObjectProtocol] = []
     private var apps: [URL] = []
+    private var installedSettings = Set<String>()
     private var local: [SearchResult] = []
     private var metadata: [SearchResult] = []
     private var fastFiles: [SearchResult] = []
@@ -97,11 +100,11 @@ struct SearchResult: Identifiable {
                 }
                 let finder = URL(fileURLWithPath: "/System/Library/CoreServices/Finder.app")
                 if FileManager.default.fileExists(atPath: finder.path) { paths.insert(finder) }
-                return paths.sorted { $0.path < $1.path }
+                return (paths.sorted { $0.path < $1.path }, SystemSettingsCatalog.installedIdentifiers())
             }.value
-            apps = found
+            apps = found.0; installedSettings = found.1
             preferredApps = [:]
-            for url in found {
+            for url in apps {
                 let key = url.lastPathComponent.lowercased()
                 if preferredApps[key] == nil { preferredApps[key] = url }
             }
@@ -156,6 +159,13 @@ struct SearchResult: Identifiable {
             }
             if let score = Matcher.score("SpotFast Settings", query: input), input.count >= 3 {
                 rows.append(SearchResult(id: "settings", title: "SpotFast Settings", subtitle: "Make it yours", kind: .settings, action: .settings, score: Double(score) - 50))
+            }
+            if settings.useSystemSettings {
+                rows += SystemSettingsCatalog.search(input, installed: installedSettings).map { hit in
+                    SearchResult(id: "system-setting:" + hit.pane.id, title: hit.pane.title,
+                        subtitle: "System Settings", kind: .systemSetting, action: .open(hit.destination),
+                        score: hit.score, section: "System Settings", customSymbol: hit.pane.symbol)
+                }
             }
             if settings.useDictionary, input.lowercased().hasPrefix("define ") {
                 let word = String(input.dropFirst(7)).trimmingCharacters(in: .whitespaces)
