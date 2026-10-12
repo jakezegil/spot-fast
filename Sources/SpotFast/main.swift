@@ -16,7 +16,7 @@ final class LauncherPanel: NSPanel {
 }
 
 @MainActor final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
-    private let settings = SettingsStore()
+    private lazy var settings = SettingsStore(persist: !smoke)
     private lazy var usage = UsageStore(persist: !smoke)
     private lazy var model = SearchModel(settings: settings, usage: usage)
     private let health = ServiceHealth()
@@ -62,7 +62,7 @@ final class LauncherPanel: NSPanel {
         let main = NSMenu()
         let appItem = NSMenuItem(); let appMenu = NSMenu()
         add(appMenu, title: "Settings…", action: #selector(showSettings)).keyEquivalent = ","
-        appMenu.addItem(.separator()); add(appMenu, title: "Quit SpotFast", action: #selector(quit)).keyEquivalent = "q"
+        appMenu.addItem(.separator()); add(appMenu, title: "Quit SpotFast", action: #selector(quit))
         appItem.submenu = appMenu; main.addItem(appItem)
         let edit = NSMenuItem(title: "Edit", action: nil, keyEquivalent: "")
         let editMenu = NSMenu(title: "Edit")
@@ -163,6 +163,7 @@ final class LauncherPanel: NSPanel {
         let flags = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
         guard flags.contains(.command) else { return false }
         let key = event.charactersIgnoringModifiers?.lowercased() ?? ""
+        if key == "q" { hide(); return true }
         if key == "," { showSettings(); return true }
         if key == "k" { if model.selectedResult != nil { model.showActions.toggle() }; return true }
         if key == "p" || key == "y" { model.showPreview.toggle(); return true }
@@ -191,6 +192,11 @@ final class LauncherPanel: NSPanel {
     }
     func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool { showSettings(); return true }
     func applicationWillTerminate(_ notification: Notification) {
+        if !smoke {
+            let state: [String: Any] = ["pid": ProcessInfo.processInfo.processIdentifier, "commandSpace": settings.commandSpace, "registered": false]
+            let path = URL(fileURLWithPath: NSHomeDirectory() + "/Library/Application Support/SpotFast/registration.plist")
+            if let bytes = try? PropertyListSerialization.data(fromPropertyList: state, format: .xml, options: 0) { try? bytes.write(to: path, options: .atomic) }
+        }
         if let hotKey { UnregisterEventHotKey(hotKey) }
         if let hotKeyHandler { RemoveEventHandler(hotKeyHandler) }
     }
@@ -215,12 +221,42 @@ final class LauncherPanel: NSPanel {
                     showSettings()
                     DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) { [self] in
                         snapshot(settingsWindow!, name: "settings")
-                        print("UI smoke passed: calculator, System Settings search, scope filtering, launcher and settings rendering")
-                        NSApp.terminate(nil)
+                        functionalSmoke()
+
                     }
                 }
             }
         }
+    }
+    private func functionalSmoke() {
+        model.beginSession()
+        settings.applicationAliases = [ApplicationAlias(name: "browser", applicationPath: "/System/Library/CoreServices/Finder.app")]
+        model.text = "browser"
+        guard model.selectedResult?.isAlias == true, model.selectedResult?.title == "Finder" else { fputs("Alias smoke failed\n", stderr); exit(1) }
+        model.text = "fnder"
+        guard model.selectedResult?.title == "Finder" else { fputs("Typo smoke failed\n", stderr); exit(1) }
+        let directory = URL(fileURLWithPath: FileManager.default.currentDirectoryPath).appendingPathComponent(".build/ui-smoke/folder")
+        do {
+            try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+            let fixture = directory.appendingPathComponent("spotfast-folder-probe.txt")
+            try Data("Names-only coverage fixture".utf8).write(to: fixture)
+            settings.useFSearch = false; settings.useMetadata = false; settings.showHiddenFiles = true
+            settings.selectedFolders = [try SelectedFolder(url: directory)]
+            model.text = "spotfast-folder-probe"
+            DispatchQueue.main.asyncAfter(deadline: .now() + 2) { [self] in
+                guard model.selectedResult?.fileURL?.path == fixture.path else { fputs("Selected-folder coverage smoke failed\n", stderr); exit(1) }
+                settings.selectedFolders = []
+                guard !model.results.contains(where: { $0.fileURL?.path == fixture.path }) else { fputs("Removed folder retained stale results\n", stderr); exit(1) }
+                show()
+                let quitKey = NSEvent.keyEvent(with: .keyDown, location: .zero, modifierFlags: .command,
+                    timestamp: ProcessInfo.processInfo.systemUptime, windowNumber: panel.windowNumber,
+                    context: nil, characters: "q", charactersIgnoringModifiers: "q", isARepeat: false, keyCode: 12)!
+                guard panel.performKeyEquivalent(with: quitKey), !panel.isVisible else { fputs("Command-Q dismissal failed\n", stderr); exit(1) }
+                try? FileManager.default.removeItem(at: fixture)
+                print("UI smoke passed: calculator, Settings search, aliases, typos, selected-folder coverage, scope filtering and rendering")
+                NSApp.terminate(nil)
+            }
+        } catch { fputs("Coverage fixture failed: \(error)\n", stderr); exit(1) }
     }
     private func snapshot(_ window: NSWindow, name: String) {
         guard let view = window.contentView else { return }

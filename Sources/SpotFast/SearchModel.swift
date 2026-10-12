@@ -21,6 +21,7 @@ struct SearchResult: Identifiable {
     var score: Double = 0
     var section: String = "Results"
     var customSymbol: String?
+    var isAlias = false
     var fileURL: URL? {
         if case .open(let url) = action, url.isFileURL { return url }
         return nil
@@ -44,6 +45,7 @@ struct SearchResult: Identifiable {
 @MainActor final class SearchModel: ObservableObject {
     let settings: SettingsStore
     let usage: UsageStore
+    let folders = SelectedFolderIndex()
     @Published var text = "" { didSet { if text != oldValue { schedule(resetSelection: true) } } }
     @Published var scope = SearchScope.all { didSet { schedule(resetSelection: true) } }
     @Published private(set) var results: [SearchResult] = []
@@ -62,10 +64,18 @@ struct SearchResult: Identifiable {
     private var query: NSMetadataQuery?
     private var observers: [NSObjectProtocol] = []
     private var apps: [URL] = []
+    private let appMonitor = DirectoryMonitor()
+    private var appTimer: Timer?
+    private var workspaceObservers: [NSObjectProtocol] = []
+    private var appRefreshing = false
+    private var appRefreshQueued = false
     private var installedSettings = Set<String>()
     private var local: [SearchResult] = []
     private var metadata: [SearchResult] = []
     private var fastFiles: [SearchResult] = []
+    private var folderFiles: [SearchResult] = []
+    private var folderSearch: Task<Void, Never>?
+    private var folderPending = false
     private var generation = 0
     private var metadataPending = false
     private var fastPending = false
@@ -79,36 +89,41 @@ struct SearchResult: Identifiable {
 
     init(settings: SettingsStore, usage: UsageStore) {
         self.settings = settings; self.usage = usage
+        folders.changed = { [weak self] in self?.schedule(resetSelection: false) }
+        folders.configure(settings.selectedFolders, excluded: settings.excludedFolders, hidden: settings.showHiddenFiles)
+        appMonitor.changed = { [weak self] in self?.refreshApps() }
+        for event in [NSWorkspace.didMountNotification, NSWorkspace.didUnmountNotification, NSWorkspace.didLaunchApplicationNotification] {
+            workspaceObservers.append(NSWorkspace.shared.notificationCenter.addObserver(forName: event, object: nil, queue: .main) { [weak self] _ in
+                MainActor.assumeIsolated {
+                    self?.refreshApps()
+                    if event == NSWorkspace.didMountNotification || event == NSWorkspace.didUnmountNotification { self?.folders.refresh() }
+                }
+            })
+        }
+        appTimer = Timer.scheduledTimer(withTimeInterval: 30, repeats: true) { [weak self] _ in MainActor.assumeIsolated { self?.refreshApps() } }
         refreshApps()
     }
     func refreshApps() {
+        guard !appRefreshing else { appRefreshQueued = true; return }
+        appRefreshing = true
         Task {
             let found = await Task.detached(priority: .utility) {
                 let roots = ["/Applications", "/System/Applications", "/System/Library/CoreServices/Applications", NSHomeDirectory() + "/Applications"]
-                var paths = Set<URL>()
-                for root in roots {
-                    // macOS marks Safari's top-level app link hidden. Include
-                    // installed bundles before traversing non-hidden subfolders.
-                    for url in (try? FileManager.default.contentsOfDirectory(at: URL(fileURLWithPath: root), includingPropertiesForKeys: nil)) ?? [] where url.pathExtension == "app" {
-                        paths.insert(url)
-                    }
-                    guard let enumerator = FileManager.default.enumerator(at: URL(fileURLWithPath: root),
-                        includingPropertiesForKeys: [.isDirectoryKey], options: [.skipsHiddenFiles, .skipsPackageDescendants]) else { continue }
-                    for case let url as URL in enumerator {
-                        if url.pathExtension == "app" { paths.insert(url); enumerator.skipDescendants() }
-                    }
-                }
+                let snapshot = ApplicationScanner.scan(roots: roots.map { URL(fileURLWithPath: $0) })
+                var paths = snapshot.applications
                 let finder = URL(fileURLWithPath: "/System/Library/CoreServices/Finder.app")
-                if FileManager.default.fileExists(atPath: finder.path) { paths.insert(finder) }
-                return (paths.sorted { $0.path < $1.path }, SystemSettingsCatalog.installedIdentifiers())
+                if FileManager.default.fileExists(atPath: finder.path) { paths.append(finder) }
+                return (paths, SystemSettingsCatalog.installedIdentifiers(), snapshot.directories)
             }.value
             apps = found.0; installedSettings = found.1
+            appMonitor.watch(found.2); appRefreshing = false
             preferredApps = [:]
             for url in apps {
                 let key = url.lastPathComponent.lowercased()
                 if preferredApps[key] == nil { preferredApps[key] = url }
             }
             schedule(resetSelection: false)
+            if appRefreshQueued { appRefreshQueued = false; refreshApps() }
         }
     }
     func beginSession() {
@@ -120,28 +135,34 @@ struct SearchResult: Identifiable {
     }
     func suspend() {
         active = false
-        generation += 1; debounce?.cancel(); stopMetadata()
-        metadataPending = false; fastPending = false; searching = false; showActions = false
+        generation += 1; debounce?.cancel(); folderSearch?.cancel(); stopMetadata()
+        metadataPending = false; fastPending = false; folderPending = false; searching = false; showActions = false
     }
-    func settingsChanged() { schedule(resetSelection: false) }
+    func settingsChanged() {
+        folders.configure(settings.selectedFolders, excluded: settings.excludedFolders, hidden: settings.showHiddenFiles)
+        schedule(resetSelection: false)
+    }
     private func schedule(resetSelection: Bool) {
-        generation += 1; debounce?.cancel(); stopMetadata()
-        metadataPending = false; fastPending = false
+        generation += 1; debounce?.cancel(); folderSearch?.cancel(); stopMetadata()
+        metadataPending = false; fastPending = false; folderPending = false
         if resetSelection { userNavigated = false; showActions = false; selected = 0 }
         // Retain still-relevant filename rows while the next provider response arrives.
         metadata = settings.useMetadata && !input.isEmpty ? metadata.filter { Matcher.score($0.title, query: input) != nil } : []
         fastFiles = settings.useFSearch && !input.isEmpty ? fastFiles.filter { Matcher.score($0.title, query: input) != nil } : []
+        folderFiles = folders.entries.isEmpty ? [] : folderFiles.filter { ResultRanking.fileNameScore($0.title, query: input) != nil }
         notice = nil
         local = localResults(input); merge()
         guard active, !input.isEmpty, scope != .applications else { searching = false; return }
         let token = generation
         metadataPending = settings.useMetadata
         fastPending = settings.useFSearch
-        searching = metadataPending || fastPending
+        folderPending = !folders.entries.isEmpty
+        searching = metadataPending || fastPending || folderPending
         debounce = Task {
             // Local answers are immediate. Disk-backed providers coalesce rapid typing.
             try? await Task.sleep(nanoseconds: 65_000_000)
             guard !Task.isCancelled, token == generation else { return }
+            if !folders.entries.isEmpty { startFolderSearch(input, token: token) }
             if settings.useFSearch { startFSearch(input, token: token) }
             if settings.useMetadata { startMetadata(input, token: token) }
         }
@@ -176,6 +197,12 @@ struct SearchResult: Identifiable {
             }
         }
         if scope != .files {
+            rows += settings.applicationAliases.compactMap { alias in
+                guard let score = alias.score(query: input) else { return nil }
+                let url = URL(fileURLWithPath: alias.applicationPath)
+                return SearchResult(id: "app:" + url.lastPathComponent.lowercased(), title: url.deletingPathExtension().lastPathComponent,
+                    subtitle: "Alias: " + alias.name, kind: .application, action: .open(url), score: score, section: "Applications", isAlias: true)
+            }
             rows += apps.compactMap { url -> SearchResult? in
                 guard let score = ResultRanking.applicationScore(url.deletingPathExtension().lastPathComponent, query: input) else { return nil }
                 var result = fileResult(url, section: "Applications")
@@ -283,7 +310,21 @@ struct SearchResult: Identifiable {
             }
         }
     }
-    private func updateSearching() { searching = metadataPending || fastPending }
+    private func startFolderSearch(_ input: String, token: Int) {
+        let entries = folders.entries
+        folderSearch = Task {
+            let worker = Task.detached(priority: .userInitiated) { FolderCatalog.search(input, entries: entries, cancelled: { Task.isCancelled }) }
+            let hits = await withTaskCancellationHandler { await worker.value } onCancel: { worker.cancel() }
+            guard token == generation else { return }
+            folderFiles = hits.map { entry in
+                var item = fileResult(URL(fileURLWithPath: entry.path), folder: entry.directory)
+                item.score = ResultRanking.fileNameScore(item.title, query: input) ?? 200
+                return item
+            }
+            folderPending = false; updateSearching(); merge()
+        }
+    }
+    private func updateSearching() { searching = metadataPending || fastPending || folderPending }
     private func fileResult(_ source: URL, folder: Bool = false, section: String = "Files") -> SearchResult {
         let app = source.pathExtension == "app" && !source.deletingLastPathComponent().pathComponents.contains(where: { $0.hasSuffix(".app") })
         let url = app ? (preferredApps[source.lastPathComponent.lowercased()] ?? source) : source
@@ -306,16 +347,18 @@ struct SearchResult: Identifiable {
     private func merge() {
         let previousID = selectedResult?.id
         var winners: [String: SearchResult] = [:]
-        for var item in local + fastFiles + metadata where accepted(item) {
+        for var item in local + fastFiles + metadata + folderFiles where accepted(item) {
             if !isEmptyQuery {
                 if let url = item.fileURL {
                     let pathQuery = ResultRanking.hasFileIntent(input)
                     // Preserve the intentional existing-path result above search hits.
                     if item.score != 1600 {
-                        if item.kind == .application {
+                        if item.kind == .application && !item.isAlias {
                             guard let score = ResultRanking.applicationScore(item.title, query: input) else { continue }
                             item.score = score
                             if pathQuery { item.score = min(item.score, 850) }
+                        } else if item.isAlias {
+                            // Explicit aliases retain the user's selected application.
                         } else if let score = ResultRanking.fileNameScore(item.title, query: input) {
                             item.score = score
                         } else {
@@ -325,7 +368,7 @@ struct SearchResult: Identifiable {
                         }
                     }
                     let penalty = ResultRanking.pathPenalty(url.path, query: input, filesOnly: scope == .files, application: item.kind == .application)
-                    if item.score != 1600 { item.score -= penalty }
+                    if item.score != 1600 && !item.isAlias { item.score -= penalty }
                 }
                 let pinned = item.fileURL.map { settings.pinnedPaths.contains($0.standardizedFileURL.path) } ?? false
                 item.score = ResultRanking.personalized(item.score, usage: settings.learnUsage ? usage.boost(id: item.id) : 0, pinned: pinned)

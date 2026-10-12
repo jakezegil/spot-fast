@@ -86,6 +86,8 @@ struct SettingsView: View {
                 Toggle("Web search action", isOn: $settings.useWeb)
                 if settings.useWeb { Picker("Search engine", selection: $settings.webEngine) { ForEach(WebEngine.allCases) { Text($0.title).tag($0) } } }
             } header: { Text("Sources") } footer: { Text("Web queries are sent only when you choose the web result. Turning off filename results does not stop its background service.") }
+            ApplicationAliasesView(settings: settings)
+            FileCoverageView(settings: settings, index: model.folders)
             Section("File results") {
                 Toggle("Show hidden files", isOn: $settings.showHiddenFiles)
             }
@@ -116,8 +118,8 @@ struct SettingsView: View {
             Section("Permissions") {
                 LabeledContent("Filename service", value: "Ordinary user permissions")
                 LabeledContent("Full Disk Access", value: "Not requested")
-                LabeledContent("Protected folders", value: "Excluded from filename indexing")
-                Text("Document search uses Apple's existing metadata index and macOS privacy controls.").foregroundStyle(.secondary)
+                LabeledContent("FSearch protected folders", value: "Excluded from daemon indexing")
+                Text("Document search uses Apple's metadata index. Optional selected-folder search uses the read-only access you grant through the folder picker.").foregroundStyle(.secondary)
             }
             Section("Pinned items") {
                 Text("Pinned app and file paths are stored in your local preferences. Remove a pin through the launcher's action menu.").foregroundStyle(.secondary)

@@ -1,6 +1,9 @@
 #!/usr/bin/env python3
 """Check the installed launcher and hardened daemon, including real file search."""
 import json
+import os
+import re
+import subprocess
 import plistlib
 import socket
 import time
@@ -21,9 +24,17 @@ def request(payload):
             raise RuntimeError("Oversized daemon response")
         return json.loads(line)
 
+def registration_is_live(registration, job_output):
+    match = re.search(r"(?m)^\s*pid = (\d+)\s*$", job_output)
+    running = re.search(r"(?m)^\s*state = running\s*$", job_output)
+    return bool(running and match and registration.get("registered")
+        and registration.get("commandSpace") and int(match.group(1)) == registration.get("pid"))
+
 def main():
     registration = plistlib.loads((SUPPORT / "registration.plist").read_bytes())
-    assert registration["registered"] and registration["commandSpace"], "Command–Space is not registered"
+    job = subprocess.run(["/bin/launchctl", "print", f"gui/{os.getuid()}/local.spotfast.launcher"], capture_output=True, text=True)
+    if job.returncode or not registration_is_live(registration, job.stdout):
+        raise RuntimeError("SpotFast is stopped or its shortcut record is stale. Open SpotFast or restart its launcher login agent.")
     assert request({"op": "ping"}) == {"ok": True, "profile": "spotfast-names-v1"}
     assert request({"op": "save"})["ok"] is False, "Mutating operation was accepted"
     with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as stream:

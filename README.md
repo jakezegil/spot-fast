@@ -32,15 +32,15 @@ Setup performs these steps before changing your launcher:
 
 A failed activation restores the previous settings and installation. The installer preserves other keyboard shortcuts and Apple's indexing services. It uses macOS's internal shortcut activation utility; behavior across OS releases still requires verification.
 
-Both processes start at login. Quit SpotFast through its menu to stop the launcher for the current session. The daemon remains available until its login agent stops.
+Both processes start at login. Quit SpotFast through its menu to stop the launcher for the current session. Command–Q dismisses the launcher panel; it does not quit the background launcher. The daemon remains available until its login agent stops.
 
-The app uses an ad hoc signature for local development. It is not notarized. No Full Disk Access, Accessibility, root daemon, or keyboard-monitoring permission is requested.
+The app uses an ad hoc signature for local development. It is not notarized. No Full Disk Access, Accessibility, root daemon, or keyboard-monitoring permission is requested. Optional selected-folder access is granted through the native folder picker.
 
 ## Validation
 
-Version 0.2.2 was tested on macOS 15.3.1 with Apple Silicon. The installed app registered Command–Space, and both user login agents ran successfully. The installed binaries matched the tested signed bundle.
+Version 0.3.0 was tested on macOS 15.3.1 with Apple Silicon. The installed app registered Command–Space, and both user login agents ran successfully. The installed binaries matched the tested signed bundle.
 
-Twenty Rust tests passed under release optimization. All thirty-seven Swift tests, including live socket tests, passed without skips. Six installer regression tests passed. The pinned lockfile passed cargo-audit against 1,299 RustSec advisories, with no reported vulnerabilities or warnings.
+Twenty Rust tests passed under release optimization. All forty-five Swift tests, including live socket tests, passed without skips. Six installer regression tests and three launcher-health regression tests passed. The pinned lockfile passed cargo-audit against 1,307 RustSec advisories, with no reported vulnerabilities or warnings.
 
 Runtime checks verified private directory/socket/lock permissions, the dedicated endpoint, and native shortcut registration. Apple metadata returned the existing Safari application entry. Validation included a completed index containing more than 14 million entries. Live filename search returned the temporary verification file; request rejection and daemon recovery checks passed. Fresh scans can take several minutes on large filesystems. Protected folders remain excluded; no Full Disk Access was granted.
 
@@ -70,7 +70,8 @@ The Swift build uses `--disable-sandbox` to support managed build environments. 
 
 | Input or key | Behavior |
 | --- | --- |
-| `safari`, `vsc` | Match application names, including subsequences |
+| `safari`, `vsc`, `chorme` | Match app names, initials, and small spelling errors |
+| Configured aliases, such as `browser` | Open the application chosen for that alias |
 | `readme ext:rs` | Search filenames through FSearch |
 | `quarterly report` | Search filenames and indexed document text |
 | `sound`, `volume`, `wifi`, `keyboard shortcuts`, `dark mode` | Open the matching System Settings pane |
@@ -96,6 +97,16 @@ The Swift build uses `--disable-sandbox` to support managed build environments. 
 Open Settings with Command–Comma, the gear button, or the menu bar icon. Configure the shortcut, search sources, appearance, privacy, folder exclusions, and index service there. Pin items through their action menu. Choose a web search engine in Settings; queries are sent only when you open its result.
 
 The launcher starts as a compact bar and expands when you type. Existing rows keep their order after keyboard navigation. Local usage history improves ranking without retaining queries. Ranking favors strong app-name matches, matches filename stems, and demotes recognized caches, dependencies, SDKs, simulator data, and system internals. Files mode uses smaller path penalties. See [the ranking review](docs/RANKING-REVIEW.md), [the design and process decisions](docs/UX-AND-PROCESSES.md) and [Claude's review](docs/claude-design-review.md).
+
+## File coverage, aliases, and app discovery
+
+Open Settings → Search to see which file providers cover each area. FSearch still skips protected folders and other mounted volumes. Apple's metadata search supplies permitted indexed results from those locations; its coverage depends on macOS indexing and privacy settings.
+
+For additional filename coverage, choose **Add folder to search…**. Select Desktop, Documents, Downloads, a cloud folder, or a mounted drive. SpotFast retains read-only folder bookmarks and indexes names in its own process. This index stays in memory, skips package descendants and directory symlinks, respects exclusions, and refreshes every minute. It accepts at most 16 selected folders and 100,000 names total. Settings reports partial indexes, unavailable folders, and scan limits. Broad roots such as the whole home directory are rejected. Individual filesystem operations can still wait on an unresponsive mounted filesystem; scanning runs away from the UI thread.
+
+Application aliases are configured on the same page. Choose an app and an alias, such as `browser` or `editor`. Exact aliases take priority in All and Apps; they do not affect Files. Aliases remain configured if their target disappears, so you can reconnect a drive or remove the alias yourself.
+
+App spelling correction handles bounded insertions, deletions, substitutions, and adjacent swaps, including `chorme`. Correct app-name matches retain stronger priority. Automatic discovery watches application directories and nested non-package folders, refreshes on volume/application events, and performs a 30-second fallback scan. Installing or removing ordinary applications no longer requires restarting SpotFast.
 
 ## FSearch security boundary
 
@@ -134,3 +145,7 @@ The check creates and removes a temporary file inside this repository. It waits 
 ## License
 
 SpotFast is available under the [MIT License](LICENSE). Vendored FSearch retains [its upstream MIT License](vendor/fsearch/LICENSE) and copyright notice.
+
+## GUI integration checks
+
+After building, run `python3 scripts/smoke_ui.py`. The helper uses a separate bundle identifier and in-memory settings. It checks aliases, spelling correction, selected-folder search with both other file providers disabled, and the launcher views. It does not register a global shortcut or modify the live app's preferences.

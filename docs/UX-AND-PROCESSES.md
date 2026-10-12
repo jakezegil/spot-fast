@@ -52,9 +52,9 @@ CLANG_MODULE_CACHE_PATH="$PWD/.build/clang-cache" swift test --disable-sandbox -
 Run the GUI smoke check from the repository after building:
 
 ```sh
-dist/SpotFast.app/Contents/MacOS/SpotFast --ui-smoke-test
+python3 scripts/smoke_ui.py
 ```
 
-The GUI check renders its own windows. It does not register a global shortcut or alter preferences. It checks calculator results and category filtering. Render artifacts are written to `.build/ui-smoke`. Native layer-backed controls can be omitted from bitmap captures; screenshots alone do not verify keyboard behavior.
+The GUI check renders its own windows. It does not register a global shortcut or alter preferences. It checks calculator results, Settings shortcuts, aliases, spelling correction, selected-folder search, and category filtering. The helper uses a separate application identity and in-memory settings. Render artifacts are written to `.build/ui-smoke`. Native layer-backed controls can be omitted from bitmap captures; screenshots alone do not verify keyboard behavior.
 
 Run `python3 scripts/verify_runtime.py` to check the installed shortcut and real filename search.

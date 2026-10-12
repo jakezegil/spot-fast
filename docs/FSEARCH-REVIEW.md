@@ -37,7 +37,7 @@ Added Rust checks cover bounded frames, invalid UTF-8, symlink/hardlink lock att
 
 Swift checks cover arithmetic, conversions, filename matching, malformed and oversized replies, response-profile verification, path sanitation, and live socket behavior. Python checks cover preserving unrelated preferences, restoring the previous app, and rejecting symlinked installer files.
 
-Installation and verification completed on macOS 15.3.1 with Apple Silicon. All 20 Rust tests passed in release mode, including long multibyte filenames. The latest launcher passed all 30 Swift tests without skips. Six installer tests passed, including launchd shutdown waiting and bootstrap retries.
+Installation and verification completed on macOS 15.3.1 with Apple Silicon. All 20 Rust tests passed in release mode, including long multibyte filenames. The launcher now passes all 45 Swift tests without skips, including selected-folder and application-discovery checks. Six installer tests passed, including launchd shutdown waiting and bootstrap retries.
 
 Cargo-audit checked 24 locked dependencies against 1,299 RustSec advisories and reported no vulnerabilities or warnings. The installed app signature verified. The daemon and app are running as user login agents. The live app reported successful Command–Space registration. Socket, index-directory, and lock-file modes are 0600, 0700, and 0600 respectively, owned by the current user.
 

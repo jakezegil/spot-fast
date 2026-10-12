@@ -70,7 +70,12 @@ public enum ResultRanking {
     }
     public static func applicationScore(_ name: String, query: String) -> Double? {
         let q = query.lowercased().hasSuffix(".app") ? String(query.dropLast(4)) : query
-        guard let match = match(name, query: q, allowInitials: true) else { return nil }
+        let normal = match(name, query: q, allowInitials: true)
+        if !hasFileIntent(q), let edits = typoDistance(name, query: q),
+           normal == nil || normal == .fuzzy || normal == .substring {
+            return (edits == 1 ? 1100 : 950) + quality(name)
+        }
+        guard let match = normal else { return nil }
         let base: Double
         switch match {
         case .exact: base = 1400
@@ -81,6 +86,30 @@ public enum ResultRanking {
         case .fuzzy: base = 300
         }
         return base + quality(name)
+    }
+    /// Bounded optimal-string-alignment distance, including adjacent swaps.
+    public static func typoDistance(_ name: String, query: String) -> Int? {
+        let q = folded(query.trimmingCharacters(in: .whitespacesAndNewlines))
+        guard q.count >= 4, q.count <= 64, !q.contains(where: { $0.isWhitespace }) else { return nil }
+        let limit = q.count >= 8 ? 2 : 1
+        let a = Array(q)
+        return ([folded(name)] + tokens(name)).compactMap { candidate -> Int? in
+            let b = Array(candidate)
+            guard !b.isEmpty, b.count <= 64, abs(a.count - b.count) <= limit else { return nil }
+            var rows = [Array(0...b.count), Array(repeating: 0, count: b.count + 1)]
+            for i in 1...a.count {
+                var current = Array(repeating: 0, count: b.count + 1); current[0] = i
+                for j in 1...b.count {
+                    current[j] = min(rows[0][j] + 1, current[j - 1] + 1, rows[0][j - 1] + (a[i - 1] == b[j - 1] ? 0 : 1))
+                    if i > 1, j > 1, a[i - 1] == b[j - 2], a[i - 2] == b[j - 1] {
+                        current[j] = min(current[j], rows[1][j - 2] + 1)
+                    }
+                }
+                rows = [current, rows[0]]
+            }
+            let distance = rows[0][b.count]
+            return distance > 0 && distance <= limit ? distance : nil
+        }.min()
     }
     public static func fileNameScore(_ name: String, query: String) -> Double? {
         let ext = (name as NSString).pathExtension

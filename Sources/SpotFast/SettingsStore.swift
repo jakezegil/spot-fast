@@ -21,6 +21,7 @@ enum WebEngine: String, CaseIterable, Identifiable {
 
 @MainActor final class SettingsStore: ObservableObject {
     private let defaults: UserDefaults
+    private let saveChanges: Bool
     var changed: (() -> Void)?
     @Published var commandSpace: Bool { didSet { persist("commandSpace", commandSpace) } }
     @Published var appearance: AppearanceChoice { didSet { persist("appearance", appearance.rawValue) } }
@@ -37,9 +38,11 @@ enum WebEngine: String, CaseIterable, Identifiable {
     @Published var showHiddenFiles: Bool { didSet { persist("showHiddenFiles", showHiddenFiles) } }
     @Published var excludedFolders: [String] { didSet { persist("excludedFolders", excludedFolders) } }
     @Published var pinnedPaths: [String] { didSet { persist("pinnedPaths", pinnedPaths) } }
+    @Published var selectedFolders: [SelectedFolder] { didSet { if let bytes = try? JSONEncoder().encode(selectedFolders) { persist("selectedFolders", bytes) } } }
+    @Published var applicationAliases: [ApplicationAlias] { didSet { if let bytes = try? JSONEncoder().encode(applicationAliases) { persist("applicationAliases", bytes) } } }
     @Published var shortcutError: String?
-    init(defaults: UserDefaults = .standard) {
-        self.defaults = defaults
+    init(defaults: UserDefaults = .standard, persist: Bool = true) {
+        self.defaults = defaults; self.saveChanges = persist
         commandSpace = defaults.object(forKey: "commandSpace") as? Bool ?? true
         appearance = AppearanceChoice(rawValue: defaults.string(forKey: "appearance") ?? "system") ?? .system
         compactRows = defaults.bool(forKey: "compactRows")
@@ -55,8 +58,10 @@ enum WebEngine: String, CaseIterable, Identifiable {
         showHiddenFiles = defaults.bool(forKey: "showHiddenFiles")
         excludedFolders = defaults.stringArray(forKey: "excludedFolders") ?? []
         pinnedPaths = defaults.stringArray(forKey: "pinnedPaths") ?? []
+        selectedFolders = Array((defaults.data(forKey: "selectedFolders").flatMap { try? JSONDecoder().decode([SelectedFolder].self, from: $0) } ?? []).prefix(16))
+        applicationAliases = Array((defaults.data(forKey: "applicationAliases").flatMap { try? JSONDecoder().decode([ApplicationAlias].self, from: $0) } ?? []).filter(\.isValid).prefix(128))
     }
-    private func persist(_ key: String, _ value: Any) { defaults.set(value, forKey: key); changed?() }
+    private func persist(_ key: String, _ value: Any) { if saveChanges { defaults.set(value, forKey: key) }; changed?() }
     var shortcutLabel: String { commandSpace ? "⌘ Space" : "⌥ Space" }
     func togglePin(_ url: URL) {
         let path = url.standardizedFileURL.path
