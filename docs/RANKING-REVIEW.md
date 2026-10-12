@@ -64,3 +64,27 @@ Thirty Swift tests and twenty Rust tests passed. The dependency audit reported n
 Regression tests cover browser and editor relevance, filename stems, application initials, multiword queries, explicit file intent, Unicode, technical-path exceptions, nested helpers, personalization bounds, and simulator/SDK classification. Existing socket, calculator, conversion, and selection tests remain enabled.
 
 The live comparisons retain raw result paths only in local `.build/result-inspector` artifacts. The report above contains no private file paths.
+
+## Contacts follow-up, 0.4.1
+
+The initial Contacts scores competed with app matches even for one-character prefixes. Plain words also matched email domains. The reported queries were `ch`, `chr`, and `chrome`.
+
+Claude reviewed synthetic comparisons across app, file, and contact scores. The correction lowers broad contact matches and checks each query token against a distinct name token. This prevents repeated words from inflating relevance. Existing application typo correction remains unchanged.
+
+| Contact match | Base score |
+| --- | ---: |
+| Exact email or full phone number, with recipient-shaped input | 1250 |
+| Exact full name, at least three characters | 950 |
+| Email prefix or phone prefix/suffix, at least seven digits for phones | 900 |
+| Multiple distinct name-token prefixes, each at least two characters | 850 |
+| Whole name token, at least three characters | 820 |
+| Name or word prefix, at least three characters | 600 |
+| Exact full name or token, one or two characters | 300 |
+| Short prefixes, initials, or name substrings | 250 |
+| Partial recipient address | 200 |
+
+Phone matching requires at least four digits. Email matching requires an `@` and at least four characters. Plain words such as `mail` and `chrome` cannot match email domains. Contact substrings require three characters. Strong app matches remain above contact names; exact filename matches remain above full contact names. A whole contact-name token can beat a mere filename prefix.
+
+Regression tests compare contacts with application and filename scores for `ch`, `chr`, and `chrome`. They also cover address intent, phone normalization, repeated tokens, full names, and reversed name tokens. The optimized 10,000-contact benchmark measured approximately 9 ms median and 12 ms maximum. Contact search stays off the UI thread and cancels obsolete queries.
+
+The Messages handoff had two independent errors: the legacy-only application identifier and an opaque recipient URL. The installed Messages app uses `com.apple.MobileSMS`. It accepted `imessage://recipient` and displayed both a fictional phone number and a synthetic email address. No message was typed or sent. The isolated launcher smoke test checks the Return command, application resolution, and recipient dispatch.

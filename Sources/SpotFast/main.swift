@@ -229,6 +229,9 @@ final class LauncherPanel: NSPanel {
         }
     }
     private func functionalSmoke() {
+        guard let messages = model.messagesApplicationURL,
+              ["com.apple.MobileSMS", "com.apple.iChat"].contains(Bundle(url: messages)?.bundleIdentifier ?? "") else { fputs("Messages app resolution failed\n", stderr); exit(1) }
+
         model.contacts.setTestEntries([ContactEntry(id: "test-alex", name: "Alex Example", addresses: [ContactAddress(label: "Mobile", value: "+1 202 555 0100")])])
         model.scope = .contacts; model.text = ""
         guard model.results.count == 1, model.selectedResult?.kind == .contact,
@@ -268,9 +271,17 @@ final class LauncherPanel: NSPanel {
                     }
                     guard model.results.count == 1, model.selectedResult?.title == "Alex Example" else { fputs("Async contact search failed\n", stderr); exit(1) }
                     snapshot(panel, name: "contacts")
+                    var messageDispatched = false
+                    model.dispatchMessage = { url, app, completion in
+                        guard url.absoluteString == "imessage://+12025550100",
+                              ["com.apple.MobileSMS", "com.apple.iChat"].contains(Bundle(url: app)?.bundleIdentifier ?? "") else { fputs("Message recipient handoff failed\n", stderr); exit(1) }
+                        messageDispatched = true; completion(nil)
+                    }
+                    command("insertNewline:")
+                    guard messageDispatched else { fputs("Contact Return command failed\n", stderr); exit(1) }
                     settings.useContacts = false
                     guard model.results.isEmpty else { fputs("Disabled contacts retained rows\n", stderr); exit(1) }
-                    print("UI smoke passed: contacts, async cancellation, contact privacy, calculator, Settings search, aliases, typos, folder coverage, scope filtering and rendering")
+                    print("UI smoke passed: contacts, Return-to-Messages dispatch, async cancellation, contact privacy, calculator, Settings search, aliases, typos, folder coverage, scope filtering and rendering")
                     NSApp.terminate(nil)
                 }
             }

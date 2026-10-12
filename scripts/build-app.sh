@@ -25,9 +25,9 @@ cat > "$app_dir/Contents/Info.plist" <<'PLIST'
 <key>CFBundleName</key><string>SpotFast</string>
 <key>CFBundleExecutable</key><string>SpotFast</string>
 <key>CFBundlePackageType</key><string>APPL</string>
-<key>CFBundleShortVersionString</key><string>0.4.0</string>
+<key>CFBundleShortVersionString</key><string>0.4.1</string>
 <key>NSContactsUsageDescription</key><string>Search your contacts locally and open Messages addressed to the person you choose. Contact details are kept only in memory.</string>
-<key>CFBundleVersion</key><string>6</string>
+<key>CFBundleVersion</key><string>7</string>
 <key>LSMinimumSystemVersion</key><string>13.0</string>
 <key>LSUIElement</key><true/>
 <key>NSHighResolutionCapable</key><true/>

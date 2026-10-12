@@ -24,7 +24,7 @@ public struct ContactAddress: Equatable, Sendable {
     }
     public var messagesURL: URL? {
         guard let recipient, let escaped = recipient.addingPercentEncoding(withAllowedCharacters: CharacterSet(charactersIn: "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789@.-+_")) else { return nil }
-        return URL(string: "imessage:" + escaped)
+        return URL(string: "imessage://" + escaped)
     }
 }
 
@@ -34,12 +34,14 @@ public struct ContactEntry: Sendable {
     public let addresses: [ContactAddress]
     fileprivate let foldedName: String
     fileprivate let words: [String]
-    fileprivate let searchableAddresses: [String]
+    fileprivate let emails: [String]
+    fileprivate let phoneNumbers: [String]
     public init(id: String, name: String, addresses: [ContactAddress]) {
         self.id = id; self.name = name; self.addresses = addresses.filter { $0.messagesURL != nil }
         foldedName = ContactIndex.fold(name)
         words = foldedName.split(whereSeparator: { !$0.isLetter && !$0.isNumber }).map(String.init)
-        searchableAddresses = addresses.compactMap(\.recipient).map(ContactIndex.fold)
+        emails = self.addresses.filter(\.isEmail).compactMap(\.recipient).map(ContactIndex.fold)
+        phoneNumbers = self.addresses.filter { !$0.isEmail }.compactMap(\.recipient).map { $0.filter(\.isNumber) }
     }
 }
 
@@ -50,24 +52,44 @@ public struct ContactIndex: Sendable {
     fileprivate static func fold(_ value: String) -> String {
         value.folding(options: [.caseInsensitive, .diacriticInsensitive, .widthInsensitive], locale: Locale(identifier: "en_US_POSIX"))
     }
+    private static func matchesDistinctWords(_ tokens: [String], words: [String]) -> Bool {
+        guard tokens.count <= words.count else { return false }
+        if tokens.count == 1 { return words.contains { $0.hasPrefix(tokens[0]) } }
+        var used = Set<Int>()
+        for token in tokens {
+            guard let index = words.indices.first(where: { !used.contains($0) && words[$0].hasPrefix(token) }) else { return false }
+            used.insert(index)
+        }
+        return true
+    }
     public func search(_ query: String, limit: Int = 60, cancelled: @Sendable () -> Bool = { false }) -> [(entry: ContactEntry, score: Double)] {
         guard limit > 0 else { return [] }
         let q = Self.fold(query.trimmingCharacters(in: .whitespacesAndNewlines))
         guard !q.isEmpty else { return entries.prefix(limit).map { ($0, 0) } }
         let tokens = q.split(whereSeparator: { !$0.isLetter && !$0.isNumber }).map(String.init)
-        let number = q.filter { "0123456789+".contains($0) }
-        let phoneQuery = q.allSatisfy { "0123456789+()- .".contains($0) } && number.count >= 3
+        let number = q.filter { "0123456789".contains($0) }
+        let phoneQuery = q.allSatisfy { "0123456789+()- .".contains($0) } && number.count >= 4
+        let emailQuery = q.contains("@") && q.count >= 4
+        let distinctTokens = tokens.sorted { $0.count > $1.count }
         var best: [(entry: ContactEntry, score: Double)] = []
         for (offset, entry) in entries.enumerated() {
             if offset % 256 == 0 && cancelled() { return [] }
             let score: Double
-            if entry.foldedName == q { score = 1380 }
-            else if entry.words.contains(q) { score = 1280 }
-            else if entry.foldedName.hasPrefix(q) { score = 1180 }
-            else if !tokens.isEmpty && tokens.allSatisfy({ token in entry.words.contains { $0.hasPrefix(token) } }) { score = 880 }
-            else if entry.searchableAddresses.contains(where: { $0 == q || (phoneQuery && $0 == number) }) { score = 1380 }
-            else if q.count >= 3 && entry.searchableAddresses.contains(where: { $0.contains(phoneQuery ? number : q) }) { score = 780 }
-            else if q.count >= 2 && entry.foldedName.contains(q) { score = 620 }
+            // Apps and exact file names win ambiguous launcher queries. Contacts
+            // gain strong scores only from a specific name or recipient address.
+            if emailQuery && entry.emails.contains(q) { score = 1250 }
+            else if phoneQuery && number.count >= 7 && entry.phoneNumbers.contains(number) { score = 1250 }
+            else if entry.foldedName == q { score = q.count <= 2 ? 300 : 950 }
+            else if entry.words.contains(q) { score = q.count <= 2 ? 300 : 820 }
+            else if !tokens.isEmpty && Self.matchesDistinctWords(distinctTokens, words: entry.words) {
+                score = tokens.count > 1 ? (tokens.allSatisfy { $0.count >= 2 } ? 850 : 250) : (q.count <= 2 ? 250 : 600)
+            }
+            else if entry.foldedName.hasPrefix(q) { score = q.count <= 2 ? 250 : 600 }
+            else if emailQuery && entry.emails.contains(where: { $0.hasPrefix(q) }) { score = 900 }
+            else if phoneQuery && number.count >= 7 && entry.phoneNumbers.contains(where: { $0.hasPrefix(number) || $0.hasSuffix(number) }) { score = 900 }
+            else if emailQuery && entry.emails.contains(where: { $0.contains(q) }) { score = 200 }
+            else if phoneQuery && entry.phoneNumbers.contains(where: { $0.contains(number) }) { score = 200 }
+            else if q.count >= 3 && entry.foldedName.contains(q) { score = 250 }
             else { continue }
             // Bounded insertion keeps allocations and sorting independent of address-book size.
             let position = best.firstIndex { $0.score < score } ?? best.count

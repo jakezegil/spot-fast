@@ -21,9 +21,9 @@ final class ContactIndexTests: XCTestCase {
             XCTAssertNil(ContactAddress(label: "Email", value: value, isEmail: true).messagesURL, value)
         }
         let phone = alex.addresses[0].messagesURL!
-        XCTAssertEqual(phone.absoluteString, "imessage:+12025550100")
+        XCTAssertEqual(phone.absoluteString, "imessage://+12025550100")
         XCTAssertNil(phone.query); XCTAssertNil(phone.fragment)
-        XCTAssertEqual(alex.addresses[1].messagesURL?.absoluteString, "imessage:alex+work@example.com")
+        XCTAssertEqual(alex.addresses[1].messagesURL?.absoluteString, "imessage://alex+work@example.com")
     }
     func testBoundedResultsAndDeterministicOrder() {
         let entries = (0..<100).map { ContactEntry(id: String($0), name: "Alex \($0)", addresses: []) }
@@ -33,6 +33,50 @@ final class ContactIndexTests: XCTestCase {
         XCTAssertEqual(index.search("alex 99").first?.entry.id, "99")
         XCTAssertTrue(index.search("alex", limit: 0).isEmpty)
         XCTAssertTrue(index.search("alex", cancelled: { true }).isEmpty)
+    }
+    func testChromePrefixesStayBelowAppsAndClearFileMatches() {
+        let index = ContactIndex(entries: [
+            ContactEntry(id: "chris", name: "Chris Example", addresses: []),
+            ContactEntry(id: "chrome", name: "Chrome Support", addresses: []),
+            ContactEntry(id: "email", name: "Alex Example", addresses: [ContactAddress(label: "Work", value: "alex@chrome.example", isEmail: true)]),
+            ContactEntry(id: "short", name: "Ch", addresses: [])
+        ])
+        for query in ["ch", "chr", "chrome"] {
+            let hits = index.search(query)
+            XCTAssertFalse(hits.isEmpty)
+            XCTAssertFalse(hits.contains { $0.entry.id == "email" }, query)
+            let app = ResultRanking.applicationScore("Google Chrome", query: query)!
+            let file = ResultRanking.fileNameScore("Chrome notes.txt", query: query)!
+            for hit in hits {
+                XCTAssertLessThan(ResultRanking.personalized(hit.score, usage: 95, pinned: true), app, query)
+                // Exact contact name tokens can beat a mere filename prefix,
+                // while short/broad prefixes must not displace filename matches.
+                if query != "chrome" { XCTAssertLessThan(hit.score, file, query) }
+            }
+        }
+    }
+    func testAddressMatchesRequireRecipientIntent() {
+        let index = ContactIndex(entries: [ContactEntry(id: "person", name: "Alex Example", addresses: [
+            ContactAddress(label: "Email", value: "alex@gmail.com", isEmail: true),
+            ContactAddress(label: "Mobile", value: "+1 202 555 0100")
+        ])])
+        for query in ["mail", "gmail", "com", "202"] { XCTAssertTrue(index.search(query).isEmpty, query) }
+        XCTAssertEqual(index.search("alex@gmail.com").first?.score, 1250)
+        XCTAssertEqual(index.search("alex@gm").first?.score, 900)
+        XCTAssertEqual(index.search("+1 (202) 555-0100").first?.score, 1250)
+        XCTAssertEqual(index.search("2025550100").first?.score, 900)
+        XCTAssertEqual(index.search("0100").first?.score, 200)
+    }
+    func testSpecificPeopleRemainUsefulWithoutInflatedRepeatedTokens() {
+        let index = ContactIndex(entries: [alex])
+        XCTAssertEqual(index.search("alex gar").first?.score, 850)
+        XCTAssertEqual(index.search("gar al").first?.entry.id, "alex")
+        XCTAssertEqual(index.search("alex garcia").first?.score, 950)
+        XCTAssertEqual(index.search("alex").first?.score, 820)
+        XCTAssertTrue(index.search("alex alex").isEmpty)
+        XCTAssertLessThan(index.search("a g").first?.score ?? 0, 600)
+        XCTAssertLessThan(index.search("alex").first!.score, ResultRanking.applicationScore("Alex Editor", query: "alex")!)
+        XCTAssertLessThan(index.search("alex garcia").first!.score, ResultRanking.fileNameScore("Alex Garcia.pdf", query: "alex garcia")!)
     }
     func testLargeAddressBookSearchLatency() {
         let entries = (0..<10_000).map { ContactEntry(id: String($0), name: "Person Example \($0)", addresses: [ContactAddress(label: "Mobile", value: "+1202555\(String(format: "%04d", $0))")]) }

@@ -38,9 +38,9 @@ The app uses an ad hoc signature for local development. It is not notarized. No 
 
 ## Validation
 
-Version 0.4.0 was tested on macOS 15.3.1 with Apple Silicon. The installed app registered Command–Space, and both user login agents ran successfully. The installed binaries matched the tested signed bundle.
+Version 0.4.1 was tested on macOS 15.3.1 with Apple Silicon. The installed app registered Command–Space, and both user login agents ran successfully. The installed binaries matched the tested signed bundle.
 
-Twenty Rust tests passed under release optimization. All forty-nine Swift tests, including live socket tests, passed without skips. Six installer regression tests and three launcher-health regression tests passed. The pinned lockfile passed cargo-audit against 1,307 RustSec advisories, with no reported vulnerabilities or warnings.
+Twenty Rust tests passed under release optimization. All fifty-two Swift tests, including live socket tests, passed without skips. Six installer regression tests and three launcher-health regression tests passed. The pinned lockfile passed cargo-audit against 1,307 RustSec advisories, with no reported vulnerabilities or warnings.
 
 Runtime checks verified private directory/socket/lock permissions, the dedicated endpoint, and native shortcut registration. Apple metadata returned the existing Safari application entry. Validation included a completed index containing more than 14 million entries. Live filename search returned the temporary verification file; request rejection and daemon recovery checks passed. Fresh scans can take several minutes on large filesystems. Protected folders remain excluded; no Full Disk Access was granted.
 
@@ -52,9 +52,11 @@ Contacts appear in All and the Contacts category. Search by name, phone number, 
 
 Open Settings → Search → Contacts and select **Allow Contacts**. macOS asks for permission once. You can disable this source or change its permission in System Settings. Permission is never requested while typing.
 
-Contact details stay in memory. They are not written to the filename index, preferences, search history, or logs. Loading and searching run off the main thread. Changes to the contact store refresh the snapshot. Search cancels stale queries and returns at most 60 contacts. A release benchmark with 10,000 synthetic contacts measured approximately 10 ms median and 14 ms maximum on this Mac.
+In All, strong app and exact filename matches rank above broad contact matches. One- or two-character contact prefixes receive low scores. Phone and email matching requires a query shaped like a recipient address; ordinary words do not match email domains. Full names and distinct name tokens rank above contact substrings.
 
-The app uses [Apple's Contacts framework](https://developer.apple.com/documentation/contacts/accessing-the-contact-store) and the `imessage` scheme registered by the installed Messages app. It opens a recipient conversation or compose window; it does not send a message. Messages determines whether that address supports iMessage or SMS forwarding. Recipient routing is tested with synthetic data; actual delivery requires your Messages account configuration.
+Contact details stay in memory. They are not written to the filename index, preferences, search history, or logs. Loading and searching run off the main thread. Changes to the contact store refresh the snapshot. Search cancels stale queries and returns at most 60 contacts. A release benchmark with 10,000 synthetic contacts measured approximately 9 ms median and 12 ms maximum on this Mac.
+
+The app uses [Apple's Contacts framework](https://developer.apple.com/documentation/contacts/accessing-the-contact-store) and the `imessage` scheme registered by the installed Messages app. It opens a recipient conversation or compose window; it does not send a message. Messages determines whether that address supports iMessage or SMS forwarding. Recipient routing was verified in Messages with a fictional phone number and a synthetic email address. The app resolves the installed modern or legacy Messages bundle and uses `imessage://recipient`. Actual delivery requires your Messages account configuration.
 
 ## Restore the previous launcher
 

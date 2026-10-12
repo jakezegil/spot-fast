@@ -61,6 +61,9 @@ struct SearchResult: Identifiable {
     var dismiss: (() -> Void)?
     var openSettings: (() -> Void)?
     var didOpen: ((URL) -> Void)?
+    var dispatchMessage: (URL, URL, @escaping (Error?) -> Void) -> Void = { url, app, completion in
+        NSWorkspace.shared.open([url], withApplicationAt: app, configuration: NSWorkspace.OpenConfiguration()) { _, error in completion(error) }
+    }
     private var userNavigated = false
     private var active = false
     @Published var showHome = false
@@ -458,10 +461,16 @@ struct SearchResult: Identifiable {
         }
         dismiss?()
     }
+    var messagesApplicationURL: URL? {
+        for identifier in ["com.apple.MobileSMS", "com.apple.iChat"] {
+            if let url = NSWorkspace.shared.urlForApplication(withBundleIdentifier: identifier) { return url }
+        }
+        return nil
+    }
     func message(_ address: ContactAddress?) {
         guard let url = address?.messagesURL else { notice = "This contact has no phone number or email usable in Messages."; return }
-        guard let app = NSWorkspace.shared.urlForApplication(withBundleIdentifier: "com.apple.iChat") else { notice = "Messages isn't available."; return }
-        NSWorkspace.shared.open([url], withApplicationAt: app, configuration: NSWorkspace.OpenConfiguration()) { [weak self] _, error in
+        guard let app = messagesApplicationURL else { notice = "Messages isn't available."; return }
+        dispatchMessage(url, app) { [weak self] error in
             Task { @MainActor in
                 if error != nil { self?.notice = "Couldn't open Messages." }
                 else { self?.dismiss?() }
