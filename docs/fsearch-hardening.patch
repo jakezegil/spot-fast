@@ -1,0 +1,777 @@
+--- a/Cargo.toml
++++ b/Cargo.toml
+@@ -2,6 +2,7 @@
+ name = "fsearch"
+ version = "0.2.0"
+ edition = "2024"
++rust-version = "1.88"
+ license = "MIT"
+ 
+ [dependencies]
+@@ -19,9 +20,11 @@
+ lto = "fat"
+ codegen-units = 1
+ strip = true
++overflow-checks = true
+ 
+ # Release plus symbols, for profilers: cargo build --profile profiling
+ [profile.profiling]
+ inherits = "release"
+ debug = 1
+ strip = false
++
+--- a/src/content.rs
++++ b/src/content.rs
+@@ -406,9 +406,9 @@
+     }
+ 
+     fn load(dir: &Path, id: u64) -> Option<Segment> {
+-        let f = std::fs::File::open(seg_path(dir, id)).ok()?;
+-        let map = std::sync::Arc::new(unsafe { Mmap::map(&f) }.ok()?);
++        let map = std::sync::Arc::new(crate::security::snapshot(&seg_path(dir, id)).ok()?);
+         let [ndocs, ntri, plen, paths_len, nwords, nown, dict_len] = fields(&map, MAGIC)?.map(|v| v as usize);
++        if [ndocs, ntri, plen, paths_len, nwords, nown, dict_len].iter().any(|&n| n > map.len()) { return None; }
+         let (off, total) = layout(&lens(ndocs, ntri, plen, paths_len, nwords, nown, dict_len));
+         if map.len() < total {
+             return None;
+@@ -763,8 +763,14 @@
+ 
+ impl Held {
+     fn find(&self, h: u64) -> Option<u32> {
+-        let at = |s: S, k: usize| unsafe { (self.map.as_ptr().add(self.off[s as usize]) as *const u32).add(k).read() };
+-        let hash = |c: u32| unsafe { (self.map.as_ptr().add(self.off[S::Hash as usize]) as *const u64).add(c as usize).read() };
++        let at = |s: S, k: usize| {
++            let start = self.off[s as usize].checked_add(k.checked_mul(4).expect("content offset overflow")).expect("content offset overflow");
++            u32::from_le_bytes(self.map[start..start.checked_add(4).unwrap()].try_into().unwrap())
++        };
++        let hash = |c: u32| {
++            let start = self.off[S::Hash as usize].checked_add((c as usize).checked_mul(8).expect("hash offset overflow")).expect("hash offset overflow");
++            u64::from_le_bytes(self.map[start..start.checked_add(8).unwrap()].try_into().unwrap())
++        };
+         let (mut lo, mut hi) = (0, self.nown);
+         while lo < hi {
+             let mid = (lo + hi) / 2;
+@@ -2085,6 +2091,9 @@
+     /// Open the segments the manifest lists, without touching anything: the
+     /// view of an engine that follows another process's index.
+     pub fn open_shared(dir: PathBuf) -> Content {
++        if crate::security::launcher_mode() {
++            return Content { dir, segs: Vec::new(), next_id: 1, gids: Vec::new(), base: Vec::new(), blocks: Vec::new(), copies: Vec::new(), users: Vec::new(), sources: Vec::new() };
++        }
+         let manifest: Vec<u64> =
+             std::fs::read_to_string(dir.join("manifest")).unwrap_or_default().split_whitespace().filter_map(|s| s.parse().ok()).collect();
+         let segs: Vec<Segment> = manifest.iter().filter_map(|&id| Segment::load(&dir, id)).collect();
+@@ -2097,6 +2106,7 @@
+ 
+     /// Open as the owner: also delete what the manifest doesn't list.
+     pub fn open(dir: PathBuf) -> Content {
++        if crate::security::launcher_mode() { return Content::open_shared(dir); }
+         std::fs::create_dir_all(&dir).ok();
+         USER_SKIPS.lock().unwrap().0 = dir.parent().map(|d| d.join(SKIP_LIST));
+         let c = Content::open_shared(dir);
+@@ -4707,3 +4717,4 @@
+     unsafe { libc::fcntl(f.as_raw_fd(), libc::F_RDADVISE, &ra) };
+     Some((f, len))
+ }
++
+--- a/src/engine.rs
++++ b/src/engine.rs
+@@ -228,14 +228,14 @@
+     /// while a saved index loads, and answer `Err` while the very first run
+     /// builds one.
+     pub fn start(opts: Options) -> Result<Engine, String> {
+-        std::fs::create_dir_all(&opts.dir).map_err(|e| e.to_string())?;
++        crate::security::private_dir(&opts.dir).map_err(|e| e.to_string())?;
+         // One writer per index: a second one would race index writes. The
+         // lock dies with the process.
+-        let lock = std::fs::File::create(opts.dir.join("daemon.lock")).map_err(|e| e.to_string())?;
++        let lock = crate::security::private_file(&opts.dir.join("daemon.lock"), false).map_err(|e| e.to_string())?;
+         let owner = try_lock(&lock);
+         let skip: Vec<Vec<u8>> = match opts.skip {
+             Some(v) => v.into_iter().map(|p| p.as_os_str().as_bytes().to_vec()).collect(),
+-            None if has_full_disk_access() && std::env::var_os("FSEARCH_RESTRICT").is_none() => Vec::new(),
++            None if std::env::var_os("FSEARCH_RESTRICT").is_none() && has_full_disk_access() => Vec::new(),
+             None => {
+                 log("no Full Disk Access: skipping consent-gated folders (grant it to fsearch to index everything)");
+                 gated(&opts.home)
+@@ -249,7 +249,7 @@
+         let (tx, rx) = std::sync::mpsc::channel();
+         let (ctx, crx) = std::sync::mpsc::channel();
+         let content = if owner { Content::open(dir.join("content")) } else { Content::open_shared(dir.join("content")) };
+-        let content_ready = AtomicBool::new(!owner || !content.segs.is_empty());
++        let content_ready = AtomicBool::new(crate::security::launcher_mode() || !owner || !content.segs.is_empty());
+         let shared = Arc::new(Shared {
+             live: RwLock::new(None),
+             loading: (Mutex::new(loading.is_some()), Condvar::new()),
+@@ -566,6 +566,11 @@
+ }
+ 
+ fn start_content(s: &Arc<Shared>) {
++    if crate::security::launcher_mode() {
++        // Dropping the receiver also prevents unconsumed FSEvent resyncs accumulating.
++        drop(s.content_rx.lock().unwrap().take());
++        return;
++    }
+     let Some(rx) = s.content_rx.lock().unwrap().take() else { return };
+     let s = s.clone();
+     spawn("fsearch-content", move || content_loop(&s, rx));
+@@ -1171,3 +1176,4 @@
+ pub fn default_dir(home: &str) -> PathBuf {
+     Path::new(home).join("Library/Application Support/FSearch")
+ }
++
+--- a/src/index.rs
++++ b/src/index.rs
+@@ -306,7 +306,13 @@
+ macro_rules! sec {
+     ($name:ident, $s:expr, $t:ty, $len:ident) => {
+         pub fn $name(&self) -> &[$t] {
+-            unsafe { std::slice::from_raw_parts(self.map.as_ptr().add(self.off[$s as usize]) as *const $t, self.$len) }
++            let start = self.off[$s as usize];
++            let bytes = self.$len.checked_mul(std::mem::size_of::<$t>()).expect("section length overflow");
++            let end = start.checked_add(bytes).expect("section end overflow");
++            let section = &self.map[start..end];
++            assert_eq!(section.as_ptr().align_offset(std::mem::align_of::<$t>()), 0, "unaligned section");
++            // All section types are integers or repr(C) structs containing integers.
++            unsafe { std::slice::from_raw_parts(section.as_ptr() as *const $t, self.$len) }
+         }
+     };
+ }
+@@ -880,12 +886,17 @@
+         let f = fields::<15>(&map, MAGIC)?.map(|v| v as usize);
+         let [n, d, u, names_len, event_id, synced_at, blocks, name_shift, ..] = f;
+         let run_words: [usize; 7] = f[8..].try_into().unwrap();
++        // Bound hostile counts before any multiplication or shift in section_lens.
++        if map.len() > crate::security::MAX_INDEX_BYTES as usize || n == 0 || d == 0 || u == 0
++            || [n, d, u, names_len, blocks].iter().any(|&x| x > map.len())
++            || d > n || u > n || blocks == 0 || blocks > n || name_shift > 16
++            || run_words.iter().any(|&x| x > map.len() / 8) { return None; }
+         let (off, total) = layout(&section_lens(n, d, u, names_len, blocks, name_shift, run_words));
+         let words = u.div_ceil(64);
+         if map.len() < total {
+             return None;
+         }
+-        Some(Index {
++        let index = Index {
+             n,
+             d,
+             u,
+@@ -908,13 +919,76 @@
+             counts: std::sync::OnceLock::new(),
+             top_prior: std::sync::OnceLock::new(),
+             by_key: std::sync::OnceLock::new(),
+-        })
++        };
++        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| index.valid_references())).ok().filter(|&valid| valid)?;
++        Some(index)
++    }
++
++    fn valid_references(&self) -> bool {
++        for (section, len) in [(Sec::Size, self.n), (Sec::Mtime, self.n), (Sec::DirEntry, self.d),
++            (Sec::DirStart, self.d), (Sec::DirLen, self.d), (Sec::DirEnd, self.d), (Sec::DirParent, self.d)] {
++            let start = self.off[section as usize];
++            let end = self.off[section as usize + 1];
++            let bytes = &self.map[start..end];
++            let runs = len.div_ceil(64);
++            let mut previous = runs + 1;
++            for r in 0..runs {
++                let first = (word(bytes, r * 8) >> 32) as usize;
++                let next = (word(bytes, (r + 1) * 8) >> 32) as usize;
++                if first != previous || next < first || next - first > 32 || next.checked_mul(8).is_none_or(|n| n + 8 > bytes.len()) { return false; }
++                let lo = word(bytes, r * 8) as u32;
++                for k in 0..64.min(len - r * 64) {
++                    if lo.checked_add(read(bytes, first * 64 + k * (next - first), (next - first) as u32)).is_none() { return false; }
++                }
++                previous = next;
++            }
++        }
++        let mut previous = 0;
++        for k in 0..self.u {
++            let (a, b) = self.name_span(k as u32);
++            // APFS limits characters, not UTF-8 bytes; multibyte names exceed 255 bytes.
++            // A generous byte cap still bounds packed-name expansion for hostile indexes.
++            if a != previous || b < a || b > self.names_len || b - a > 4096 || self.uname(k as u32).len() > 4096 { return false; }
++            previous = b;
++        }
++        if previous != self.names_len || self.ext_table().iter().any(|e| e[0] > 15) { return false; }
++        let mut count = 0u32;
++        for (i, (&bits, &rank)) in self.parent_bits().iter().zip(self.parent_rank()).enumerate() {
++            if rank != count { return false; }
++            if i == 0 && bits & 1 == 0 { return false; }
++            if i + 1 == self.n64 && self.n % 64 != 0 && bits >> (self.n % 64) != 0 { return false; }
++            count = count.checked_add(bits.count_ones()).unwrap();
++        }
++        if count as usize != self.blocks { return false; }
++        for i in 0..self.n { if self.ent_name(i) as usize >= self.u || self.parent(i) as usize >= self.d { return false; } }
++        if self.dir_entry(0) != 0 || self.dir_parent(0) != 0 { return false; }
++        let mut previous_entry = 0;
++        for d in 0..self.d {
++            let entry = self.dir_entry(d) as usize;
++            let start = self.dir_start(d) as usize;
++            let len = self.dir_len(d) as usize;
++            let end = self.dir_end(d) as usize;
++            if entry >= self.n || start.checked_add(len).is_none_or(|n| n > end) || end > self.n
++                || (d > 0 && (entry <= previous_entry || self.dir_parent(d) as usize >= d)) { return false; }
++            previous_entry = entry;
++        }
++        let offsets = self.bits(Sec::NameEntsOff, width(self.n + 1));
++        let entries = self.bits(Sec::NameEnts, width(self.n));
++        let mut last = 0;
++        for k in 0..=self.u {
++            let offset = offsets.get(k) as usize;
++            if offset < last || offset > self.n || (k == 0 && offset != 0) { return false; }
++            last = offset;
++        }
++        if last != self.n { return false; }
++        for k in 0..self.n { if entries.get(k) as usize >= self.n { return false; } }
++        true
+     }
+ 
+     /// Write atomically (tmp + rename), stamping the current event id.
+     pub fn save(&self, path: &Path) -> std::io::Result<()> {
+         let tmp = path.with_extension("tmp");
+-        let mut f = std::fs::File::create(&tmp)?;
++        let mut f = crate::security::private_file(&tmp, true)?;
+         // The header with the current event id (the rest as built).
+         let mut h = self.map[..HDR].to_vec();
+         h[8 + 4 * 8..][..16].copy_from_slice(&[self.event_id.to_le_bytes(), (self.synced_at as u64).to_le_bytes()].concat());
+@@ -933,8 +1007,7 @@
+     }
+ 
+     pub fn load(path: &Path) -> Option<Index> {
+-        let f = std::fs::File::open(path).ok()?;
+-        Index::from_map(unsafe { Mmap::map(&f) }.ok()?)
++        Index::from_map(crate::security::snapshot(path).ok()?)
+     }
+ 
+     pub fn bytes(&self) -> usize {
+@@ -986,7 +1059,7 @@
+     let mut at = HDR;
+     for (k, &l) in lens.iter().enumerate() {
+         off[k] = at;
+-        at = (at + l + 63) & !63;
++        at = at.checked_add(l).and_then(|v| v.checked_add(63)).expect("index layout overflow") & !63;
+     }
+     (off, at)
+ }
+@@ -1115,14 +1188,14 @@
+ /// values end 8 bytes past their last one).
+ #[inline(always)]
+ fn word(p: &[u8], at: usize) -> u64 {
+-    debug_assert!(at + 8 <= p.len());
+-    // Unchecked: the hot loops read several values an entry.
+-    u64::from_le(unsafe { p.as_ptr().add(at).cast::<u64>().read_unaligned() })
++    let end = at.checked_add(8).expect("packed-word offset overflow");
++    u64::from_le_bytes(p[at..end].try_into().expect("packed-word bounds"))
+ }
+ 
+ /// The `w`-bit value at bit `b` of `p`.
+ #[inline(always)]
+ fn read(p: &[u8], b: usize, w: u32) -> u32 {
++    assert!(w <= 32, "invalid packed width");
+     ((word(p, b / 8) >> (b % 8)) & ((1 << w) - 1)) as u32
+ }
+ 
+@@ -1370,3 +1443,55 @@
+         _ => 0,
+     }
+ }
++
++
++#[cfg(test)]
++mod hardening_tests {
++    use super::*;
++    fn map(bytes: &[u8]) -> Mmap {
++        let mut m = MmapMut::map_anon(bytes.len().max(HDR)).unwrap();
++        m[..bytes.len()].copy_from_slice(bytes);
++        m.make_read_only().unwrap()
++    }
++    #[test]
++    fn rejects_hostile_counts_before_layout() {
++        for (slot, value) in [(0, u64::MAX), (2, u64::MAX), (7, 64), (8, u64::MAX)] {
++            let mut fields = [1u64; 15];
++            fields[7] = 5;
++            fields[slot] = value;
++            assert!(Index::from_map(map(&header(MAGIC, &fields))).is_none());
++        }
++    }
++    #[test]
++    fn valid_index_roundtrip_and_corruption_rejection() {
++        let listing = Listing { id: 0, names: b"hello".to_vec(), ents: vec![crate::walk::RawEnt {
++            name_off: 0, name_len: 5, kind: crate::walk::KIND_FILE, size: 5, mtime: 1, child: NONE
++        }] };
++        let built = Index::build(vec![listing], 1, 1, b"/Users/test");
++        assert!(Index::from_map(map(&built.map)).is_some());
++        let mut corrupt = built.map.to_vec();
++        corrupt[built.off[Sec::Parent as usize]..][..8].copy_from_slice(&0u64.to_le_bytes());
++        assert!(Index::from_map(map(&corrupt)).is_none());
++        let mut corrupt = built.map.to_vec();
++        corrupt[built.off[Sec::NameOff as usize]..][..2].copy_from_slice(&u16::MAX.to_le_bytes());
++        assert!(Index::from_map(map(&corrupt)).is_none());
++        assert!(Index::from_map(map(&built.map[..HDR])).is_none());
++    }
++    #[test]
++    fn packed_word_cannot_read_out_of_bounds() {
++        assert!(std::panic::catch_unwind(|| word(&[0; 4], 0)).is_err());
++        assert!(std::panic::catch_unwind(|| word(&[0; 8], usize::MAX)).is_err());
++    }
++
++    #[test]
++    fn accepts_long_multibyte_unicode_filenames() {
++        let name = format!("{}-spotfast-unicode-check", "界".repeat(100)).into_bytes();
++        assert!(name.len() > 255);
++        let listing = Listing { id: 0, names: name.clone(), ents: vec![crate::walk::RawEnt {
++            name_off: 0, name_len: name.len() as u16, kind: crate::walk::KIND_FILE, size: 0, mtime: 1, child: NONE
++        }] };
++        let built = Index::build(vec![listing], 1, 1, b"/Users/test");
++        assert_eq!(&*built.name(1), name.as_slice());
++        assert!(Index::from_map(map(&built.map)).is_some());
++    }
++}
+--- a/src/lib.rs
++++ b/src/lib.rs
+@@ -4,6 +4,7 @@
+ //! a daemon with a JSON-lines socket.
+ 
+ pub mod alloc;
++pub mod security;
+ pub mod content;
+ mod engine;
+ mod fsevents;
+@@ -15,3 +16,4 @@
+ pub use content::{Case, FileMatches, Grep, GrepResult, Hit};
+ pub use engine::{Engine, Found, Options, Status, default_dir, gated, has_full_disk_access, no_materialize};
+ pub use query::{GrepMode, Query};
++
+--- a/src/main.rs
++++ b/src/main.rs
+@@ -9,9 +9,8 @@
+ use std::path::PathBuf;
+ use std::time::Instant;
+ 
+-/// See `fsearch::alloc`.
+-#[global_allocator]
+-static GLOBAL: fsearch::alloc::Alloc = fsearch::alloc::Alloc;
++// Use Rust's standard allocator. The upstream custom allocator is outside
++// this integration's required performance/security boundary.
+ 
+ const USAGE: &str = "usage:
+   fsearch <query...> [--json]   search (starts the daemon if needed)
+@@ -31,8 +30,9 @@
+ }
+ 
+ fn data_dir() -> PathBuf {
+-    let d = PathBuf::from(home()).join("Library/Application Support/FSearch");
+-    std::fs::create_dir_all(&d).ok();
++    let suffix = if fsearch::security::launcher_mode() { "Library/Application Support/SpotFast/FSearch" } else { "Library/Application Support/FSearch" };
++    let d = PathBuf::from(home()).join(suffix);
++    fsearch::security::private_dir(&d).unwrap_or_else(|e| die(&format!("private data directory: {e}")));
+     d
+ }
+ 
+@@ -41,6 +41,15 @@
+ }
+ 
+ fn main() {
++    unsafe { libc::umask(0o077); }
++    // Runs before threads or Foundation callbacks are created.
++    if std::env::args().nth(1).as_deref() == Some("serve-spotfast") {
++        unsafe {
++            std::env::set_var("SPOTFAST_NAMES_ONLY", "1");
++            std::env::set_var("FSEARCH_RESTRICT", "1");
++        }
++        if unsafe { libc::geteuid() } == 0 { die("SpotFast FSearch must not run as root"); }
++    }
+     // Never let a search download iCloud placeholders: opening or listing a
+     // dataless file/dir fails fast instead of materializing it.
+     // (IOPOL_TYPE_VFS_MATERIALIZE_DATALESS_FILES, IOPOL_SCOPE_PROCESS, OFF)
+@@ -48,6 +57,9 @@
+     let args: Vec<String> = std::env::args().skip(1).collect();
+     match args.first().map(String::as_str) {
+         None | Some("-h" | "--help") => eprintln!("{USAGE}"),
++        Some("serve-spotfast") => {
++            server::serve_launcher(data_dir(), home()).unwrap_or_else(|e| die(&e));
++        }
+         Some("serve") => {
+             space_efficient();
+             server::serve(data_dir(), home())
+@@ -265,3 +277,4 @@
+     eprintln!("fsearch: {msg}");
+     std::process::exit(1)
+ }
++
+--- a/src/server.rs
++++ b/src/server.rs
+@@ -12,18 +12,119 @@
+ use std::os::unix::net::{UnixListener, UnixStream};
+ use std::path::{Path, PathBuf};
+ use std::sync::Arc;
++use std::sync::atomic::{AtomicUsize, Ordering};
++use std::os::fd::AsRawFd;
++use std::os::unix::fs::PermissionsExt;
+ use std::time::{Duration, Instant};
+ 
+ pub fn socket_path(dir: &Path) -> PathBuf {
+     dir.join("fsearch.sock")
++}
++
++fn same_user(stream: &UnixStream) -> bool {
++    let (mut uid, mut gid) = (0, 0);
++    unsafe { libc::getpeereid(stream.as_raw_fd(), &mut uid, &mut gid) == 0 && uid == libc::geteuid() }
++}
++
++struct Permit(Arc<AtomicUsize>);
++impl Permit {
++    fn acquire(active: Arc<AtomicUsize>) -> Option<Self> {
++        active.fetch_update(Ordering::AcqRel, Ordering::Acquire, |n| (n < fsearch::security::MAX_CONNECTIONS).then_some(n + 1)).ok()?;
++        Some(Self(active))
++    }
++}
++impl Drop for Permit { fn drop(&mut self) { self.0.fetch_sub(1, Ordering::AcqRel); } }
++
++/// Each frame has a total deadline, including a peer sending one byte at a time.
++fn socket_frame(reader: &mut BufReader<UnixStream>) -> std::io::Result<Option<String>> {
++    struct Timed<'a> { reader: &'a mut BufReader<UnixStream>, deadline: Instant }
++    impl std::io::Read for Timed<'_> {
++        fn read(&mut self, _: &mut [u8]) -> std::io::Result<usize> { unreachable!("frame uses BufRead") }
++    }
++    impl BufRead for Timed<'_> {
++        fn fill_buf(&mut self) -> std::io::Result<&[u8]> {
++            let left = self.deadline.checked_duration_since(Instant::now()).ok_or_else(|| std::io::Error::new(std::io::ErrorKind::TimedOut, "frame deadline"))?;
++            self.reader.get_ref().set_read_timeout(Some(left))?;
++            self.reader.fill_buf()
++        }
++        fn consume(&mut self, n: usize) { self.reader.consume(n); }
++    }
++    fsearch::security::frame(&mut Timed { reader, deadline: Instant::now() + Duration::from_secs(1) })
++}
++
++/// SpotFast's dedicated endpoint: no grep, MCP, git, frecency, or mutating operations.
++pub fn serve_launcher(dir: PathBuf, home: String) -> Result<(), String> {
++    fsearch::security::private_dir(&dir).map_err(|e| e.to_string())?;
++    let lock = fsearch::security::private_file(&dir.join("socket.lock"), false).map_err(|e| e.to_string())?;
++    if !try_lock(&lock) { return Err("another SpotFast FSearch daemon is running".into()); }
++    let engine = Arc::new(Engine::start(Options { dir: dir.clone(), home: home.clone(), skip: None })?);
++    let sock = socket_path(&dir);
++    if let Ok(meta) = std::fs::symlink_metadata(&sock) {
++        use std::os::unix::fs::{FileTypeExt, MetadataExt};
++        if !meta.file_type().is_socket() || meta.uid() != unsafe { libc::geteuid() } { return Err("unsafe existing socket".into()); }
++        std::fs::remove_file(&sock).map_err(|e| e.to_string())?;
++    }
++    let listener = UnixListener::bind(&sock).map_err(|e| e.to_string())?;
++    std::fs::set_permissions(&sock, std::fs::Permissions::from_mode(0o600)).map_err(|e| e.to_string())?;
++    let active = Arc::new(AtomicUsize::new(0));
++    for mut conn in listener.incoming().flatten() {
++        if !same_user(&conn) { continue; }
++        let Some(permit) = Permit::acquire(active.clone()) else { continue };
++        let engine = engine.clone();
++        let home = home.clone();
++        let _ = std::thread::Builder::new().name("spotfast-files".into()).spawn(move || {
++            let _permit = permit;
++            let _ = conn.set_write_timeout(Some(Duration::from_secs(1)));
++            let Ok(input) = conn.try_clone() else { return };
++            let mut reader = BufReader::new(input);
++            let Ok(Some(line)) = socket_frame(&mut reader) else { return };
++            let reply = match launcher_request(&line, &engine, &home) {
++                Ok(v) => v,
++                Err(error) => json!({"ok": false, "error": error}),
++            };
++            if let Ok(mut bytes) = serde_json::to_vec(&reply) {
++                bytes.push(b'\n');
++                if bytes.len() <= 1_048_576 { let _ = conn.write_all(&bytes); }
++            }
++        });
++    }
++    Ok(())
++}
++
++fn launcher_query(v: &Value, home: &str) -> Result<Query, String> {
++    let obj = v.as_object().ok_or("request must be an object")?;
++    if obj.keys().any(|k| !["op", "q", "limit"].contains(&k.as_str())) { return Err("unsupported launcher field".into()); }
++    let text = v.get("q").and_then(Value::as_str).ok_or("q must be a string")?;
++    if text.len() > 1024 || text.contains('\0') || text.split_whitespace().count() > 16 { return Err("invalid query".into()); }
++    if ["grep:", "regex:", "sym:", "content:", "symbol:", "git:", "re:", "path:"].iter().any(|s| text.contains(s)) { return Err("filename-only endpoint".into()); }
++    let mut q = Query::parse(text, home)?;
++    if q.grep.is_some() || q.name_re.is_some() || q.path_re.is_some() { return Err("filename-only endpoint".into()); }
++    let limit = v.get("limit").map_or(Ok(30), |v| v.as_u64().ok_or("limit must be an unsigned integer"))?;
++    q.limit = limit.clamp(1, fsearch::security::MAX_RESULTS as u64) as usize;
++    Ok(q)
++}
++
++fn launcher_request(line: &str, engine: &Engine, home: &str) -> Result<Value, String> {
++    let v: Value = serde_json::from_str(line).map_err(|e| e.to_string())?;
++    match v.get("op").and_then(Value::as_str).unwrap_or("search") {
++        "ping" => Ok(json!({"ok": true, "profile": "spotfast-names-v1"})),
++        "status" => Ok(json!({"ok": true, "profile": "spotfast-names-v1", "status": engine.status()})),
++        "search" => {
++            if !engine.status().ready { return Err(engine.indexing()); }
++            let q = launcher_query(&v, home)?;
++            let hits = engine.search(&q)?;
++            Ok(json!({"ok": true, "profile": "spotfast-names-v1", "hits": hits.iter().map(|f| json!({"kind": kind_name(f.kind), "path": f.path.to_string_lossy(), "score": f.score})).collect::<Vec<_>>()}))
++        }
++        _ => Err("unsupported launcher operation".into()),
++    }
+ }
+ 
+ pub fn serve(dir: PathBuf, home: String) {
+     // One daemon per socket. (The engine's own lock decides who writes the
+     // index: an app embedding fsearch may own it while the daemon follows.)
+-    std::fs::create_dir_all(&dir).ok();
++    if let Err(e) = fsearch::security::private_dir(&dir) { eprintln!("private directory: {e}"); return; }
+     // Opened without truncating: a loser must not wipe the owner's pid.
+-    let Ok(mut lock) = std::fs::OpenOptions::new().write(true).create(true).truncate(false).open(dir.join("socket.lock")) else { return };
++    let Ok(mut lock) = fsearch::security::private_file(&dir.join("socket.lock"), false) else { return };
+     if !try_lock(&lock) {
+         eprintln!("{} another fsearch daemon is running", fsearch::query::now_secs());
+         return;
+@@ -45,9 +146,16 @@
+     let sock = socket_path(&dir);
+     let _ = std::fs::remove_file(&sock);
+     let listener = UnixListener::bind(&sock).expect("bind socket");
++    if std::fs::set_permissions(&sock, std::fs::Permissions::from_mode(0o600)).is_err() { return; }
++    let active = Arc::new(AtomicUsize::new(0));
+     for conn in listener.incoming().flatten() {
++        if !same_user(&conn) { continue; }
++        let Some(permit) = Permit::acquire(active.clone()) else { continue };
+         let cx = cx.clone();
+-        std::thread::spawn(move || handle(conn, &cx));
++        let _ = std::thread::Builder::new().name("fsearch-client".into()).spawn(move || {
++            let _permit = permit;
++            handle(conn, &cx);
++        });
+     }
+ }
+ 
+@@ -93,23 +201,24 @@
+ const WARM: Duration = Duration::from_millis(250);
+ 
+ fn handle(mut conn: UnixStream, cx: &Ctx) {
++    let _ = conn.set_read_timeout(Some(Duration::from_secs(1)));
++    let _ = conn.set_write_timeout(Some(Duration::from_secs(1)));
+     // Content searches run on this thread: keep them on performance cores.
+     unsafe { libc::pthread_set_qos_class_self_np(libc::qos_class_t::QOS_CLASS_USER_INTERACTIVE, 0) };
+     let Ok(r) = conn.try_clone() else { return };
+     let mut out = Vec::new();
+-    for line in BufReader::new(r).lines() {
+-        let Ok(line) = line else { return };
++    let mut reader = BufReader::new(r);
++    for _ in 0..32 {
++        let Ok(Some(line)) = socket_frame(&mut reader) else { return };
+         if line.trim().is_empty() {
+             continue;
+         }
+         out.clear();
+         respond(&line, cx, &mut out);
+-        if conn.write_all(&out).is_err() {
++        if out.len() > 1_048_576 || conn.write_all(&out).is_err() {
+             return;
+         }
+-        if waiting(&conn) {
+-            cx.engine.keep_warm(WARM);
+-        }
++        // No busy-spin keep-warm driven by an untrusted peer.
+     }
+ }
+ 
+@@ -771,9 +880,9 @@
+     });
+     let num = |k: &str| v.get(k).and_then(Value::as_u64).map(|n| n as usize);
+     // One file: its matching lines, up to 200 unless told.
+-    g.max_per_file = num("per_file").unwrap_or(if file.is_some() { 200 } else { g.max_per_file });
++    g.max_per_file = num("per_file").unwrap_or(if file.is_some() { 200 } else { g.max_per_file }).clamp(1, 200);
+     if let Some(ms) = v.get("budget_ms").and_then(Value::as_u64) {
+-        g.budget = (ms > 0).then(|| Duration::from_millis(ms));
++        g.budget = Some(Duration::from_millis(ms.clamp(1, 250)));
+     }
+     (g.before, g.after) = (num("before").or(num("context")).unwrap_or(0), num("after").or(num("context")).unwrap_or(0));
+     g.defs = v.get("defs").and_then(Value::as_bool).unwrap_or(false);
+@@ -882,6 +991,7 @@
+             }
+         }
+     }
++    q.limit = q.limit.clamp(1, fsearch::security::MAX_RESULTS);
+     Ok((q, sels))
+ }
+ 
+@@ -949,9 +1059,47 @@
+     use super::*;
+ 
+     #[test]
++    fn launcher_rejects_expensive_and_mutating_fields() {
++        for value in [json!({"q": "grep:secret"}), json!({"q": "regex:.*"}), json!({"q": "git:modified"}),
++            json!({"q": "hello", "budget_ms": 0}), json!({"q": "hello", "paths": ["/tmp/x"]}),
++            json!({"q": "hello", "offset": 999999}), json!({"q": "hello", "limit": -1})] {
++            assert!(launcher_query(&value, "/Users/test").is_err());
++        }
++        assert_eq!(launcher_query(&json!({"q": "limit:999999 hello", "limit": u64::MAX}), "/Users/test").unwrap().limit, 100);
++        assert_eq!(launcher_query(&json!({"q": "hello", "limit": 0}), "/Users/test").unwrap().limit, 1);
++    }
++
++    #[test]
++    fn connection_permits_are_bounded_and_released() {
++        let active = Arc::new(AtomicUsize::new(0));
++        let permits: Vec<_> = (0..fsearch::security::MAX_CONNECTIONS).map(|_| Permit::acquire(active.clone()).unwrap()).collect();
++        assert!(Permit::acquire(active.clone()).is_none());
++        drop(permits);
++        assert!(Permit::acquire(active).is_some());
++    }
++
++    #[test]
++    fn socket_frame_has_an_absolute_deadline() {
++        let (server, mut client) = UnixStream::pair().unwrap();
++        let writer = std::thread::spawn(move || {
++            for _ in 0..20 {
++                if client.write_all(b"x").is_err() { break; }
++                std::thread::sleep(Duration::from_millis(100));
++            }
++        });
++        let start = Instant::now();
++        let mut reader = BufReader::new(server);
++        assert!(socket_frame(&mut reader).is_err());
++        assert!(start.elapsed() < Duration::from_millis(1600));
++        drop(reader);
++        writer.join().unwrap();
++    }
++
++    #[test]
+     fn near() {
+         let n = |a: &str, b: &str| nearness(a.as_bytes(), b.as_bytes());
+         assert_eq!((n("/p/src/a.rs", "/p/src/b.rs"), n("/p/src/a.rs", "/p/src/a.rs")), (12, -20));
+         assert_eq!((n("/p/src/a.rs", "/p/src/ui/c.rs"), n("/p/src/a.rs", "/p/docs/x.md"), n("/p/a/b/c/d.rs", "/q/e.rs")), (9, 6, 0));
+     }
+ }
++
+--- /dev/null
++++ b/src/security.rs
+@@ -0,0 +1,131 @@
++//! Local hardening for the SpotFast integration. No root service or network listener.
++use std::fs::{DirBuilder, File, OpenOptions};
++use std::io::{self, BufRead, Read};
++use std::os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt, PermissionsExt};
++use std::path::{Component, Path};
++
++pub const MAX_FRAME: usize = 4096;
++pub const MAX_RESULTS: usize = 100;
++pub const MAX_CONNECTIONS: usize = 8;
++pub const MAX_INDEX_BYTES: u64 = 2 * 1024 * 1024 * 1024;
++
++pub fn launcher_mode() -> bool { std::env::var_os("SPOTFAST_NAMES_ONLY").is_some() }
++
++fn denied(reason: &str) -> io::Error { io::Error::new(io::ErrorKind::PermissionDenied, reason) }
++
++/// Only root/current-user ancestors, no symlinks, no foreign-writable ancestors.
++pub fn private_dir(path: &Path) -> io::Result<()> {
++    if !path.is_absolute() { return Err(denied("data directory must be absolute")); }
++    let uid = unsafe { libc::geteuid() };
++    let mut current = std::path::PathBuf::new();
++    for part in path.components() {
++        match part {
++            Component::RootDir | Component::Normal(_) => current.push(part.as_os_str()),
++            _ => return Err(denied("non-normal data directory")),
++        }
++        let m = match std::fs::symlink_metadata(&current) {
++            Ok(m) => m,
++            Err(e) if e.kind() == io::ErrorKind::NotFound => {
++                DirBuilder::new().mode(0o700).create(&current)?;
++                std::fs::symlink_metadata(&current)?
++            }
++            Err(e) => return Err(e),
++        };
++        if !m.is_dir() || (m.uid() != uid && m.uid() != 0) || m.mode() & 0o022 != 0 {
++            return Err(denied("unsafe data-directory ancestor"));
++        }
++    }
++    let m = std::fs::symlink_metadata(path)?;
++    if m.uid() != uid { return Err(denied("data directory belongs to another user")); }
++    let f = OpenOptions::new().read(true).custom_flags(libc::O_NOFOLLOW | libc::O_DIRECTORY | libc::O_CLOEXEC).open(path)?;
++    f.set_permissions(std::fs::Permissions::from_mode(0o700))
++}
++
++pub fn private_file(path: &Path, truncate: bool) -> io::Result<File> {
++    let file = OpenOptions::new().read(true).write(true).create(true).mode(0o600)
++        .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC).open(path)?;
++    let m = file.metadata()?;
++    if !m.is_file() || m.uid() != unsafe { libc::geteuid() } || m.nlink() != 1 {
++        return Err(denied("unsafe private file"));
++    }
++    file.set_permissions(std::fs::Permissions::from_mode(0o600))?;
++    if truncate { file.set_len(0)?; }
++    Ok(file)
++}
++
++/// Copies disk bytes into an anonymous map. Disk truncation cannot invalidate pointers.
++pub fn snapshot(path: &Path) -> io::Result<memmap2::Mmap> {
++    let mut f = OpenOptions::new().read(true).custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC).open(path)?;
++    let m = f.metadata()?;
++    if !m.is_file() || m.uid() != unsafe { libc::geteuid() } || m.nlink() != 1 || m.mode() & 0o077 != 0 {
++        return Err(denied("index must be a private same-user regular file"));
++    }
++    let len = m.len();
++    if len < crate::index::HDR as u64 || len > MAX_INDEX_BYTES { return Err(io::Error::new(io::ErrorKind::InvalidData, "invalid index length")); }
++    let mut map = memmap2::MmapMut::map_anon(len as usize)?;
++    f.read_exact(&mut map)?;
++    map.make_read_only()
++}
++
++/// Bounded frame allocation, including when the peer never sends a newline.
++pub fn frame(reader: &mut impl BufRead) -> io::Result<Option<String>> {
++    let mut bytes = Vec::new();
++    loop {
++        let available = reader.fill_buf()?;
++        if available.is_empty() {
++            return if bytes.is_empty() { Ok(None) } else { Err(io::Error::new(io::ErrorKind::UnexpectedEof, "unterminated frame")) };
++        }
++        let newline = available.iter().position(|&b| b == b'\n');
++        let count = newline.map_or(available.len(), |i| i + 1);
++        if bytes.len() + count > MAX_FRAME { return Err(io::Error::new(io::ErrorKind::InvalidData, "request too large")); }
++        bytes.extend_from_slice(&available[..count]);
++        reader.consume(count);
++        if newline.is_some() {
++            bytes.pop();
++            return String::from_utf8(bytes).map(Some).map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "invalid UTF-8"));
++        }
++    }
++}
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++    use std::io::Cursor;
++    #[test]
++    fn frames_are_bounded_and_complete() {
++        assert_eq!(frame(&mut Cursor::new(b"hello\n")).unwrap(), Some("hello".into()));
++        assert!(frame(&mut Cursor::new(vec![b'x'; MAX_FRAME + 1])).is_err());
++        assert!(frame(&mut Cursor::new(b"partial")).is_err());
++        assert!(frame(&mut Cursor::new(b"\xff\n")).is_err());
++        assert!(frame(&mut Cursor::new(b"")).unwrap().is_none());
++    }
++    #[test]
++    fn private_file_rejects_symlinks_and_hardlinks() {
++        let base = std::env::temp_dir().join(format!("spotfast-file-test-{}", std::process::id()));
++        std::fs::create_dir_all(&base).unwrap();
++        let target = base.join("target");
++        std::fs::write(&target, b"preserve").unwrap();
++        let link = base.join("link");
++        std::os::unix::fs::symlink(&target, &link).unwrap();
++        assert!(private_file(&link, true).is_err());
++        std::fs::remove_file(&link).unwrap();
++        std::fs::hard_link(&target, &link).unwrap();
++        assert!(private_file(&link, true).is_err());
++        assert_eq!(std::fs::read(&target).unwrap(), b"preserve");
++        std::fs::remove_dir_all(base).unwrap();
++    }
++
++    #[test]
++    fn disk_truncation_cannot_invalidate_snapshot() {
++        use std::io::Write;
++        let path = std::env::temp_dir().join(format!("spotfast-snapshot-test-{}", std::process::id()));
++        let mut file = private_file(&path, true).unwrap();
++        let mut bytes = vec![0u8; crate::index::HDR];
++        bytes[..4].copy_from_slice(b"test");
++        file.write_all(&bytes).unwrap();
++        let map = snapshot(&path).unwrap();
++        file.set_len(0).unwrap();
++        assert_eq!(&map[..4], b"test");
++        std::fs::remove_file(path).unwrap();
++    }
++}

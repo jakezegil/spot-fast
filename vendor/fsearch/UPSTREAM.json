@@ -1,0 +1,82 @@
+{
+  "repository": "https://github.com/noahdunnagan/fsearch",
+  "commit": "e96ebeb52545ea4facd4a4b3af393c42c980fb5d",
+  "files": [
+    {
+      "path": "Cargo.lock",
+      "gitBlob": "bd5aaa04f90fad4826fa405ce874a3f85ca317f0"
+    },
+    {
+      "path": "Cargo.toml",
+      "gitBlob": "b94d733b831ff6db092579ddea9568221e2fde33"
+    },
+    {
+      "path": "LICENSE",
+      "gitBlob": "669d0ebb5aa53b4e0c2209205c42a82dbdf7b6d7"
+    },
+    {
+      "path": "README.md",
+      "gitBlob": "cdff5fe2f6ecc2b91a1e9f160a7bbc657a4ceb6d"
+    },
+    {
+      "path": "rustfmt.toml",
+      "gitBlob": "3121924d651ded44b389c1f699ab9d1152ecbfb1"
+    },
+    {
+      "path": "src/alloc.rs",
+      "gitBlob": "70428e71002c07dc9d6922a3b06007e978e337d1"
+    },
+    {
+      "path": "src/content.rs",
+      "gitBlob": "75f4800ac0a861f5ef696155618e3bde1fdb8b1f"
+    },
+    {
+      "path": "src/engine.rs",
+      "gitBlob": "d5164a81ed1bc4baee44b7e6a1775e18e2807a3c"
+    },
+    {
+      "path": "src/frecency.rs",
+      "gitBlob": "438fdeb9b065ff4673feda866d218b24853a7c4e"
+    },
+    {
+      "path": "src/fsevents.rs",
+      "gitBlob": "3ca360baddbf81c73fa6cce00a16d50212b288c8"
+    },
+    {
+      "path": "src/git.rs",
+      "gitBlob": "c5e1654d4a3f9c89a6616d0aae4c4166f1d4fdb7"
+    },
+    {
+      "path": "src/index.rs",
+      "gitBlob": "9f71265b13aec9c577d2091e017c5025287cba12"
+    },
+    {
+      "path": "src/lib.rs",
+      "gitBlob": "2d4da61fc98d9f05cc797626d5414ccd98cbf5a4"
+    },
+    {
+      "path": "src/live.rs",
+      "gitBlob": "086065ee1c066d13f010d3052ef4f61af6e176a8"
+    },
+    {
+      "path": "src/main.rs",
+      "gitBlob": "7584cc3399c6de7361da069497c0be62fdf16481"
+    },
+    {
+      "path": "src/mcp.rs",
+      "gitBlob": "444dd6170c5c863f959d3a7d2c8b0a4ea51a4ba1"
+    },
+    {
+      "path": "src/query.rs",
+      "gitBlob": "4edc9c5216e2ece3d35424bff19a701c4081dc29"
+    },
+    {
+      "path": "src/server.rs",
+      "gitBlob": "f3622487e286798e52b98a2a8af853fa16611822"
+    },
+    {
+      "path": "src/walk.rs",
+      "gitBlob": "c0a999e7828dc6a3debdf327021f7da22f5ac687"
+    }
+  ]
+}
