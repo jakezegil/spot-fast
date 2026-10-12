@@ -38,13 +38,23 @@ The app uses an ad hoc signature for local development. It is not notarized. No 
 
 ## Validation
 
-Version 0.3.0 was tested on macOS 15.3.1 with Apple Silicon. The installed app registered Command–Space, and both user login agents ran successfully. The installed binaries matched the tested signed bundle.
+Version 0.4.0 was tested on macOS 15.3.1 with Apple Silicon. The installed app registered Command–Space, and both user login agents ran successfully. The installed binaries matched the tested signed bundle.
 
-Twenty Rust tests passed under release optimization. All forty-five Swift tests, including live socket tests, passed without skips. Six installer regression tests and three launcher-health regression tests passed. The pinned lockfile passed cargo-audit against 1,307 RustSec advisories, with no reported vulnerabilities or warnings.
+Twenty Rust tests passed under release optimization. All forty-nine Swift tests, including live socket tests, passed without skips. Six installer regression tests and three launcher-health regression tests passed. The pinned lockfile passed cargo-audit against 1,307 RustSec advisories, with no reported vulnerabilities or warnings.
 
 Runtime checks verified private directory/socket/lock permissions, the dedicated endpoint, and native shortcut registration. Apple metadata returned the existing Safari application entry. Validation included a completed index containing more than 14 million entries. Live filename search returned the temporary verification file; request rejection and daemon recovery checks passed. Fresh scans can take several minutes on large filesystems. Protected folders remain excluded; no Full Disk Access was granted.
 
 The original Spotlight rollback state remains saved across upgrades. Restore from the path recorded as `backup` in `~/Library/Application Support/SpotFast/installation.plist`.
+
+## Contacts and Messages
+
+Contacts appear in All and the Contacts category. Search by name, phone number, or email. Press Return to open Messages addressed to the selected contact. Mobile numbers come first, followed by other numbers and emails. Use Actions to choose another address. Contacts without a usable address remain searchable.
+
+Open Settings → Search → Contacts and select **Allow Contacts**. macOS asks for permission once. You can disable this source or change its permission in System Settings. Permission is never requested while typing.
+
+Contact details stay in memory. They are not written to the filename index, preferences, search history, or logs. Loading and searching run off the main thread. Changes to the contact store refresh the snapshot. Search cancels stale queries and returns at most 60 contacts. A release benchmark with 10,000 synthetic contacts measured approximately 10 ms median and 14 ms maximum on this Mac.
+
+The app uses [Apple's Contacts framework](https://developer.apple.com/documentation/contacts/accessing-the-contact-store) and the `imessage` scheme registered by the installed Messages app. It opens a recipient conversation or compose window; it does not send a message. Messages determines whether that address supports iMessage or SMS forwarding. Recipient routing is tested with synthetic data; actual delivery requires your Messages account configuration.
 
 ## Restore the previous launcher
 
@@ -132,7 +142,7 @@ The links use the URL scheme registered by System Settings. Pane identifiers and
 
 ## Remaining Spotlight coverage
 
-Inline dictionary definitions, mail, contacts, calendar, reminders, currency rates, weather, Shortcuts, and system actions remain pending. Public API parity with Apple's private suggestion and app-search services is not established.
+Inline dictionary definitions, mail, calendar, reminders, currency rates, weather, Shortcuts, and system actions remain pending. Public API parity with Apple's private suggestion and app-search services is not established.
 
 ## Verify the running installation
 
@@ -148,4 +158,4 @@ SpotFast is available under the [MIT License](LICENSE). Vendored FSearch retains
 
 ## GUI integration checks
 
-After building, run `python3 scripts/smoke_ui.py`. The helper uses a separate bundle identifier and in-memory settings. It checks aliases, spelling correction, selected-folder search with both other file providers disabled, and the launcher views. It does not register a global shortcut or modify the live app's preferences.
+After building, run `python3 scripts/smoke_ui.py`. The helper uses a separate bundle identifier and in-memory settings. It checks Contacts with synthetic data, asynchronous query cancellation, disabled-source privacy, aliases, spelling correction, selected-folder search with both other file providers disabled, and the launcher views. It does not register a global shortcut or modify the live app's preferences.

@@ -18,7 +18,7 @@ final class LauncherPanel: NSPanel {
 @MainActor final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     private lazy var settings = SettingsStore(persist: !smoke)
     private lazy var usage = UsageStore(persist: !smoke)
-    private lazy var model = SearchModel(settings: settings, usage: usage)
+    private lazy var model = SearchModel(settings: settings, usage: usage, systemContactAccess: !smoke)
     private let health = ServiceHealth()
     private var panel: LauncherPanel!
     private var settingsWindow: NSWindow?
@@ -151,7 +151,7 @@ final class LauncherPanel: NSPanel {
         case "moveUp:": model.move(-1)
         case "insertNewline:": model.activate()
         case "insertTab:": model.scope = model.scope.next
-        case "insertBacktab:": model.scope = model.scope.next.next
+        case "insertBacktab:": model.scope = model.scope.previous
         case "cancelOperation:":
             if model.showActions { model.showActions = false }
             else if model.showPreview { model.showPreview = false }
@@ -229,6 +229,13 @@ final class LauncherPanel: NSPanel {
         }
     }
     private func functionalSmoke() {
+        model.contacts.setTestEntries([ContactEntry(id: "test-alex", name: "Alex Example", addresses: [ContactAddress(label: "Mobile", value: "+1 202 555 0100")])])
+        model.scope = .contacts; model.text = ""
+        guard model.results.count == 1, model.selectedResult?.kind == .contact,
+              model.selectedResult?.contactAddresses.first?.messagesURL?.scheme == "imessage" else { fputs("Contacts smoke failed\n", stderr); exit(1) }
+        model.text = ""; guard model.results.count == 1 else { fputs("Contacts home failed\n", stderr); exit(1) }
+        model.scope = .all
+
         model.beginSession()
         settings.applicationAliases = [ApplicationAlias(name: "browser", applicationPath: "/System/Library/CoreServices/Finder.app")]
         model.text = "browser"
@@ -253,8 +260,19 @@ final class LauncherPanel: NSPanel {
                     context: nil, characters: "q", charactersIgnoringModifiers: "q", isARepeat: false, keyCode: 12)!
                 guard panel.performKeyEquivalent(with: quitKey), !panel.isVisible else { fputs("Command-Q dismissal failed\n", stderr); exit(1) }
                 try? FileManager.default.removeItem(at: fixture)
-                print("UI smoke passed: calculator, Settings search, aliases, typos, selected-folder coverage, scope filtering and rendering")
-                NSApp.terminate(nil)
+                Task { @MainActor in
+                    model.scope = .contacts; model.text = "stale query"; model.text = "alex"
+                    for _ in 0..<100 {
+                        if model.selectedResult?.kind == .contact { break }
+                        try? await Task.sleep(nanoseconds: 10_000_000)
+                    }
+                    guard model.results.count == 1, model.selectedResult?.title == "Alex Example" else { fputs("Async contact search failed\n", stderr); exit(1) }
+                    snapshot(panel, name: "contacts")
+                    settings.useContacts = false
+                    guard model.results.isEmpty else { fputs("Disabled contacts retained rows\n", stderr); exit(1) }
+                    print("UI smoke passed: contacts, async cancellation, contact privacy, calculator, Settings search, aliases, typos, folder coverage, scope filtering and rendering")
+                    NSApp.terminate(nil)
+                }
             }
         } catch { fputs("Coverage fixture failed: \(error)\n", stderr); exit(1) }
     }

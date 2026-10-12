@@ -86,6 +86,10 @@ struct SettingsView: View {
                 Toggle("Web search action", isOn: $settings.useWeb)
                 if settings.useWeb { Picker("Search engine", selection: $settings.webEngine) { ForEach(WebEngine.allCases) { Text($0.title).tag($0) } } }
             } header: { Text("Sources") } footer: { Text("Web queries are sent only when you choose the web result. Turning off filename results does not stop its background service.") }
+            Section {
+                Toggle("Search contacts", isOn: $settings.useContacts)
+                ContactsAccessView(store: model.contacts, enabled: settings.useContacts)
+            } header: { Text("Contacts") } footer: { Text("Return opens Messages. Mobile numbers come first, then other numbers and emails. Choose another address in Actions. Contacts stay in memory and are never saved in search history.") }
             ApplicationAliasesView(settings: settings)
             FileCoverageView(settings: settings, index: model.folders)
             Section("File results") {

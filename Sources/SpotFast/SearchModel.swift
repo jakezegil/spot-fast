@@ -3,16 +3,17 @@ import Combine
 import SpotFastCore
 
 enum SearchScope: String, CaseIterable, Identifiable {
-    case all, applications, files
+    case all, applications, files, contacts
     var id: String { rawValue }
-    var title: String { self == .all ? "All" : self == .applications ? "Apps" : "Files" }
-    var symbol: String { self == .all ? "sparkle.magnifyingglass" : self == .applications ? "square.grid.2x2" : "folder" }
+    var title: String { self == .all ? "All" : self == .applications ? "Apps" : self == .files ? "Files" : "Contacts" }
+    var symbol: String { self == .all ? "sparkle.magnifyingglass" : self == .applications ? "square.grid.2x2" : self == .files ? "folder" : "person.crop.circle" }
+    var previous: SearchScope { Self.allCases[(Self.allCases.firstIndex(of: self)! + Self.allCases.count - 1) % Self.allCases.count] }
     var next: SearchScope { Self.allCases[(Self.allCases.firstIndex(of: self)! + 1) % Self.allCases.count] }
 }
 
 struct SearchResult: Identifiable {
-    enum Kind { case application, file, folder, calculation, conversion, dictionary, web, settings, systemSetting }
-    enum Action { case open(URL), copy(String), settings }
+    enum Kind { case contact, application, file, folder, calculation, conversion, dictionary, web, settings, systemSetting }
+    enum Action { case open(URL), copy(String), message(ContactAddress?), settings }
     let id: String
     let title: String
     let subtitle: String
@@ -22,6 +23,7 @@ struct SearchResult: Identifiable {
     var section: String = "Results"
     var customSymbol: String?
     var isAlias = false
+    var contactAddresses: [ContactAddress] = []
     var fileURL: URL? {
         if case .open(let url) = action, url.isFileURL { return url }
         return nil
@@ -29,6 +31,7 @@ struct SearchResult: Identifiable {
     var symbol: String {
         if let customSymbol { return customSymbol }
         switch kind {
+        case .contact: return "person.crop.circle"
         case .application: return "app"
         case .file: return "doc"
         case .folder: return "folder"
@@ -39,13 +42,14 @@ struct SearchResult: Identifiable {
         case .settings, .systemSetting: return "slider.horizontal.3"
         }
     }
-    var verb: String { if kind == .systemSetting { return "Open settings" }; return fileURL != nil ? (kind == .application ? "Open app" : "Open") : (kind == .calculation || kind == .conversion ? "Copy answer" : "Open") }
+    var verb: String { if kind == .contact { return "Message" }; if kind == .systemSetting { return "Open settings" }; return fileURL != nil ? (kind == .application ? "Open app" : "Open") : (kind == .calculation || kind == .conversion ? "Copy answer" : "Open") }
 }
 
 @MainActor final class SearchModel: ObservableObject {
     let settings: SettingsStore
     let usage: UsageStore
     let folders = SelectedFolderIndex()
+    let contacts: ContactStore
     @Published var text = "" { didSet { if text != oldValue { schedule(resetSelection: true) } } }
     @Published var scope = SearchScope.all { didSet { schedule(resetSelection: true) } }
     @Published private(set) var results: [SearchResult] = []
@@ -74,6 +78,9 @@ struct SearchResult: Identifiable {
     private var metadata: [SearchResult] = []
     private var fastFiles: [SearchResult] = []
     private var folderFiles: [SearchResult] = []
+    private var contactRows: [SearchResult] = []
+    private var contactSearch: Task<Void, Never>?
+    private var contactPending = false
     private var folderSearch: Task<Void, Never>?
     private var folderPending = false
     private var generation = 0
@@ -87,8 +94,11 @@ struct SearchResult: Identifiable {
     var isEmptyQuery: Bool { input.isEmpty }
     var isPinned: Bool { selectedResult?.fileURL.map { settings.pinnedPaths.contains($0.standardizedFileURL.path) } ?? false }
 
-    init(settings: SettingsStore, usage: UsageStore) {
+    init(settings: SettingsStore, usage: UsageStore, systemContactAccess: Bool = true) {
         self.settings = settings; self.usage = usage
+        contacts = ContactStore(systemAccess: systemContactAccess)
+        contacts.changed = { [weak self] in self?.contactRows = []; self?.schedule(resetSelection: false) }
+        contacts.configure(enabled: settings.useContacts)
         folders.changed = { [weak self] in self?.schedule(resetSelection: false) }
         folders.configure(settings.selectedFolders, excluded: settings.excludedFolders, hidden: settings.showHiddenFiles)
         appMonitor.changed = { [weak self] in self?.refreshApps() }
@@ -135,15 +145,16 @@ struct SearchResult: Identifiable {
     }
     func suspend() {
         active = false
-        generation += 1; debounce?.cancel(); folderSearch?.cancel(); stopMetadata()
+        generation += 1; debounce?.cancel(); folderSearch?.cancel(); contactSearch?.cancel(); contactPending = false; stopMetadata()
         metadataPending = false; fastPending = false; folderPending = false; searching = false; showActions = false
     }
     func settingsChanged() {
+        contacts.configure(enabled: settings.useContacts)
         folders.configure(settings.selectedFolders, excluded: settings.excludedFolders, hidden: settings.showHiddenFiles)
         schedule(resetSelection: false)
     }
     private func schedule(resetSelection: Bool) {
-        generation += 1; debounce?.cancel(); folderSearch?.cancel(); stopMetadata()
+        generation += 1; debounce?.cancel(); folderSearch?.cancel(); contactSearch?.cancel(); contactPending = false; stopMetadata()
         metadataPending = false; fastPending = false; folderPending = false
         if resetSelection { userNavigated = false; showActions = false; selected = 0 }
         // Retain still-relevant filename rows while the next provider response arrives.
@@ -151,13 +162,17 @@ struct SearchResult: Identifiable {
         fastFiles = settings.useFSearch && !input.isEmpty ? fastFiles.filter { Matcher.score($0.title, query: input) != nil } : []
         folderFiles = folders.entries.isEmpty ? [] : folderFiles.filter { ResultRanking.fileNameScore($0.title, query: input) != nil }
         notice = nil
+        contactRows = settings.useContacts ? contactRows.filter { item in
+            !input.isEmpty && (item.title.range(of: input, options: [.caseInsensitive, .diacriticInsensitive]) != nil || item.contactAddresses.contains { $0.value.contains(input) })
+        } : []
         local = localResults(input); merge()
-        guard active, !input.isEmpty, scope != .applications else { searching = false; return }
+        if settings.useContacts, !input.isEmpty, scope == .all || scope == .contacts { startContactSearch(input, token: generation) }
+        guard active, !input.isEmpty, (scope == .all || scope == .files) else { updateSearching(); return }
         let token = generation
         metadataPending = settings.useMetadata
         fastPending = settings.useFSearch
         folderPending = !folders.entries.isEmpty
-        searching = metadataPending || fastPending || folderPending
+        searching = metadataPending || fastPending || folderPending || contactPending
         debounce = Task {
             // Local answers are immediate. Disk-backed providers coalesce rapid typing.
             try? await Task.sleep(nanoseconds: 65_000_000)
@@ -170,6 +185,7 @@ struct SearchResult: Identifiable {
     private func localResults(_ input: String) -> [SearchResult] {
         if input.isEmpty { return homeResults() }
         var rows: [SearchResult] = []
+        if settings.useContacts, scope == .all || scope == .contacts { rows += contactRows }
         if scope == .all {
             if settings.useCalculator, let value = Calculator.evaluate(input) {
                 let answer = String(format: "%.12g", value)
@@ -196,7 +212,7 @@ struct SearchResult: Identifiable {
                 }
             }
         }
-        if scope != .files {
+        if scope == .all || scope == .applications {
             rows += settings.applicationAliases.compactMap { alias in
                 guard let score = alias.score(query: input) else { return nil }
                 let url = URL(fileURLWithPath: alias.applicationPath)
@@ -211,7 +227,7 @@ struct SearchResult: Identifiable {
             }
         }
         let expanded = (input as NSString).expandingTildeInPath
-        if scope != .applications, expanded.hasPrefix("/"), FileManager.default.fileExists(atPath: expanded) {
+        if (scope == .all || scope == .files), expanded.hasPrefix("/"), FileManager.default.fileExists(atPath: expanded) {
             var item = fileResult(URL(fileURLWithPath: expanded)); item.score = 1600
             rows.append(item)
         }
@@ -223,7 +239,28 @@ struct SearchResult: Identifiable {
         }
         return rows
     }
+    private func startContactSearch(_ query: String, token: Int) {
+        let index = contacts.index
+        guard !index.entries.isEmpty else { return }
+        contactPending = true; updateSearching()
+        contactSearch = Task {
+            let task = Task.detached(priority: .userInitiated) { index.search(query, cancelled: { Task.isCancelled }) }
+            let hits = await withTaskCancellationHandler(operation: { await task.value }, onCancel: { task.cancel() })
+            guard !Task.isCancelled, generation == token else { return }
+            contactRows = contactResults(hits); contactPending = false
+            local = localResults(input); updateSearching(); merge()
+        }
+    }
+    private func contactResults(_ hits: [(entry: ContactEntry, score: Double)]) -> [SearchResult] {
+        hits.map { hit in
+            let address = hit.entry.addresses.first
+            return SearchResult(id: "contact:" + hit.entry.id, title: hit.entry.name,
+                subtitle: address.map { "Messages · " + $0.label + " · " + $0.value } ?? "No message address",
+                kind: .contact, action: .message(address), score: hit.score, section: "Contacts", contactAddresses: hit.entry.addresses)
+        }
+    }
     private func homeResults() -> [SearchResult] {
+        if scope == .contacts { return settings.useContacts ? contactResults(contacts.index.search("")) : [] }
         var rows: [SearchResult] = []
         for path in settings.pinnedPaths {
             guard FileManager.default.fileExists(atPath: path) else { continue }
@@ -286,7 +323,7 @@ struct SearchResult: Identifiable {
                 guard let self else { return }
                 self.fastBusy = false
                 guard token == self.generation else {
-                    if self.active, self.settings.useFSearch, self.scope != .applications, !self.input.isEmpty {
+                    if self.active, self.settings.useFSearch, (self.scope == .all || self.scope == .files), !self.input.isEmpty {
                         self.startFSearch(self.input, token: self.generation)
                     }
                     return
@@ -324,7 +361,7 @@ struct SearchResult: Identifiable {
             folderPending = false; updateSearching(); merge()
         }
     }
-    private func updateSearching() { searching = metadataPending || fastPending || folderPending }
+    private func updateSearching() { searching = metadataPending || fastPending || folderPending || contactPending }
     private func fileResult(_ source: URL, folder: Bool = false, section: String = "Files") -> SearchResult {
         let app = source.pathExtension == "app" && !source.deletingLastPathComponent().pathComponents.contains(where: { $0.hasSuffix(".app") })
         let url = app ? (preferredApps[source.lastPathComponent.lowercased()] ?? source) : source
@@ -336,6 +373,7 @@ struct SearchResult: Identifiable {
             action: .open(url), section: app && section == "Files" ? "Applications" : section)
     }
     private func accepted(_ item: SearchResult) -> Bool {
+        if scope == .contacts && item.kind != .contact { return false }
         if scope == .applications && item.kind != .application { return false }
         if scope == .files && item.kind != .file && item.kind != .folder { return false }
         if let url = item.fileURL {
@@ -405,18 +443,30 @@ struct SearchResult: Identifiable {
         select(max(0, min(results.count - 1, selected + delta)))
     }
     func activate(_ item: SearchResult? = nil) {
-        guard item != nil || !isEmptyQuery || showHome else { return }
+        guard item != nil || !isEmptyQuery || showHome || scope == .contacts else { return }
         guard let item = item ?? selectedResult else { return }
         switch item.action {
         case .open(let url):
             guard NSWorkspace.shared.open(url) else { notice = "Couldn't open \(item.title)."; return }
             if settings.learnUsage { usage.record(item) }
             if url.isFileURL { didOpen?(url) }
+        case .message(let address):
+            message(address); return
         case .copy(let value):
             NSPasteboard.general.clearContents(); NSPasteboard.general.setString(value, forType: .string)
         case .settings: openSettings?(); return
         }
         dismiss?()
+    }
+    func message(_ address: ContactAddress?) {
+        guard let url = address?.messagesURL else { notice = "This contact has no phone number or email usable in Messages."; return }
+        guard let app = NSWorkspace.shared.urlForApplication(withBundleIdentifier: "com.apple.iChat") else { notice = "Messages isn't available."; return }
+        NSWorkspace.shared.open([url], withApplicationAt: app, configuration: NSWorkspace.OpenConfiguration()) { [weak self] _, error in
+            Task { @MainActor in
+                if error != nil { self?.notice = "Couldn't open Messages." }
+                else { self?.dismiss?() }
+            }
+        }
     }
     func reveal(_ item: SearchResult? = nil) {
         guard let url = (item ?? selectedResult)?.fileURL else { return }

@@ -10,9 +10,9 @@ struct SearchField: NSViewRepresentable {
         let field = NSTextField()
         field.isBordered = false; field.drawsBackground = false; field.focusRingType = .none
         field.font = .systemFont(ofSize: 23, weight: .regular)
-        field.placeholderString = "Search apps and files"
+        field.placeholderString = "Search apps, files, and contacts"
         field.textColor = .labelColor; field.delegate = context.coordinator
-        field.setAccessibilityLabel("Search apps and files")
+        field.setAccessibilityLabel("Search apps, files, and contacts")
         field.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
         context.coordinator.field = field
         context.coordinator.observer = NotificationCenter.default.addObserver(forName: .launcherShown, object: nil, queue: .main) { [weak field] _ in
@@ -91,7 +91,7 @@ struct LauncherView: View {
     @Environment(\.colorSchemeContrast) private var contrast
     var command: (String) -> Void
     var onLayout: (CGFloat) -> Void
-    private var expanded: Bool { !model.isEmptyQuery || model.showHome }
+    private var expanded: Bool { !model.isEmptyQuery || model.showHome || model.scope == .contacts }
     private var rowHeight: CGFloat { settings.compactRows ? 44 : 54 }
     private var listHeight: CGFloat { min(8, CGFloat(model.results.count)) * rowHeight + 30 }
     private var contentHeight: CGFloat { expanded ? max(110, listHeight) : 0 }
@@ -166,7 +166,7 @@ struct LauncherView: View {
                 LazyVStack(spacing: 0) {
                     if model.isEmptyQuery {
                         HStack {
-                            Text(model.results.contains { $0.section == "Recent" } ? "Pinned & recent" : "Your apps")
+                            Text(model.scope == .contacts ? "Contacts" : model.results.contains { $0.section == "Recent" } ? "Pinned & recent" : "Your apps")
                                 .font(.system(size: 10, weight: .semibold)).foregroundStyle(.secondary)
                             Spacer()
                             Text("↑ ↓ to choose").font(.system(size: 10)).foregroundStyle(.tertiary)
@@ -179,7 +179,11 @@ struct LauncherView: View {
                         VStack(spacing: 8) {
                             Image(systemName: "magnifyingglass").font(.system(size: 22)).foregroundStyle(.tertiary)
                             Text(model.searching ? "Searching your Mac…" : "No matches yet").font(.system(size: 13, weight: .medium))
-                            Text("Try an app name, a filename, or a calculation.").font(.system(size: 11)).foregroundStyle(.secondary)
+                            if model.scope == .contacts {
+                                ContactsAccessView(store: model.contacts, enabled: settings.useContacts)
+                            } else {
+                                Text("Try an app, file, contact, or calculation.").font(.system(size: 11)).foregroundStyle(.secondary)
+                            }
                         }.frame(maxWidth: .infinity).padding(20)
                     }
                 }.padding(.horizontal, 7).padding(.vertical, 5)
@@ -233,6 +237,11 @@ struct LauncherView: View {
     }
     @ViewBuilder private func actionButtons(_ result: SearchResult) -> some View {
         Button(result.verb) { model.activate(result) }
+        if result.kind == .contact {
+            ForEach(Array(result.contactAddresses.enumerated()), id: \.offset) { _, address in
+                Button("Message " + address.label + " · " + address.value) { model.message(address) }
+            }
+        }
         if result.fileURL != nil {
             Button("Reveal in Finder") { model.reveal(result) }
             Button("Preview") { model.showPreview = true; model.showActions = false }
